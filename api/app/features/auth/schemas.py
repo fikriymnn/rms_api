@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 
 from app.features.users.schemas import UserOut
+from app.features.outlets.schemas import OutletOut
 
 
 class LoginRequest(BaseModel):
@@ -14,6 +15,7 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     expires_in: int
     user: UserOut
+    outlet: OutletOut | None = None
 
 
 class RefreshRequest(BaseModel):

@@ -79,3 +79,13 @@ def test_login_throttle(client, db):
     for _ in range(5):
         assert login(client, "ani", "salah").status_code == 401
     assert login(client, "ani").status_code == 429  # terkunci sementara
+
+
+def test_login_includes_outlet_for_staff(client, db):
+    from .helpers import make_outlet
+
+    o = make_outlet(db, "Outlet X")
+    make_user(db, "ca", Role.cashier, o.id)
+    make_user(db, "boss", Role.owner)
+    assert login(client, "ca").json()["outlet"]["name"] == "Outlet X"
+    assert login(client, "boss").json()["outlet"] is None

@@ -19,6 +19,8 @@ from app.features.users.schemas import UserOut
 from .models import RefreshToken
 from .schemas import AccessOut, LoginResponse
 from .tokens import revoke_all, revoke_token  # noqa: F401
+from app.features.outlets import service as outlet_service
+from app.features.outlets.schemas import OutletOut
 
 
 def authenticate(db: Session, username: str, password: str) -> User | None:
@@ -47,6 +49,11 @@ def issue_tokens(db: Session, user: User) -> LoginResponse:
         refresh_token=raw,
         expires_in=ttl,
         user=UserOut.model_validate(user),
+        outlet=(
+            OutletOut.model_validate(outlet_service.get_outlet(db, user.outlet_id))
+            if user.outlet_id and outlet_service.get_outlet(db, user.outlet_id)
+            else None
+        ),
     )
 
 
