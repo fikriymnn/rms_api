@@ -5,3 +5,7 @@ pymysql
 cryptography
 pydantic-settings
 alembic
+argon2-cffi
+pyjwt
+pytest
+httpx

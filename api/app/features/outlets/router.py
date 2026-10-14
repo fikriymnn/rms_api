@@ -2,12 +2,18 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.features.auth.deps import require_roles
+from app.features.users.roles import Role
 
 from . import service
 from .schemas import OutletCreate, OutletOut, OutletUpdate
 
-# TODO (pelajaran 3): lindungi semua endpoint ini agar hanya bisa diakses owner.
-router = APIRouter(prefix="/outlets", tags=["outlets"])
+# semua endpoint di router ini hanya untuk owner
+router = APIRouter(
+    prefix="/outlets",
+    tags=["outlets"],
+    dependencies=[Depends(require_roles(Role.owner))],
+)
 
 
 @router.get("", response_model=list[OutletOut])
