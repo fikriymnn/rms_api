@@ -9,6 +9,7 @@ from app.core.config import settings
 from app.core.database import Base, get_db
 from app.features.auth import throttle
 from app.main import app
+from app.core.config import settings
 
 TEST_URL = make_url(settings.database_url).set(database="rms_test")
 engine = create_engine(TEST_URL, pool_pre_ping=True)
@@ -57,3 +58,8 @@ def client():
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def _photo_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "photo_dir", str(tmp_path / "photos"))

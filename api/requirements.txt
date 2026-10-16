@@ -9,3 +9,5 @@ argon2-cffi
 pyjwt
 pytest
 httpx
+pillow
+python-multipart
