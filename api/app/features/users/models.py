@@ -5,6 +5,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
 from app.core.utils import new_id
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, func
 
 
 class User(Base):
@@ -23,3 +24,10 @@ class User(Base):
     )  # kosong = owner
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
+    attendance_consent_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    attendance_consent_version: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )

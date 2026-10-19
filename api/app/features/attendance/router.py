@@ -12,6 +12,8 @@ from app.features.users.roles import Role
 from . import photos, service
 from .schemas import (
     AttendanceOut,
+    ConsentIn,
+    ConsentOut,
     CorrectionIn,
     MeOut,
     ReviewIn,
@@ -140,3 +142,8 @@ def review_record(
     rec = service.get_record_for(db, actor, record_id)
     rec = service.review(db, actor, rec, data.status, data.note)
     return service.to_out(rec, _name(db, rec.user_id))
+
+
+@router.post("/consent", response_model=ConsentOut)
+def give_consent(data: ConsentIn, actor: CurrentUser, db: Session = Depends(get_db)):
+    return service.give_consent(db, actor, data.version)

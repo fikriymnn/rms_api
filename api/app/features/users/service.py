@@ -25,6 +25,7 @@ def create_user(
     role: Role,
     outlet_id: str | None = None,
     position: str = "",
+    must_change_password: bool = False,
 ) -> User:
     """Tanpa pemeriksaan hak akses: dipakai CLI dan service di bawah ini."""
     username = username.strip().lower()
@@ -43,6 +44,7 @@ def create_user(
         position=position,
         role=role.value,
         outlet_id=outlet_id,
+        must_change_password=must_change_password,
     )
     db.add(user)
     db.commit()
@@ -104,6 +106,7 @@ def create_user_by(db: Session, actor: User, data: UserCreate) -> User:
         role=data.role,
         outlet_id=outlet_id,
         position=data.position,
+        must_change_password=True,  # password awal dibuat admin: wajib diganti
     )
 
 
@@ -141,6 +144,7 @@ def reset_password_by(
     if not policy.can_manage(actor, target):
         raise Forbidden("Anda tidak boleh mereset password user ini")
     target.password_hash = hash_password(new_password)
+    target.must_change_password = True  # password sementara
     db.commit()
     revoke_all(db, target.id)  # semua perangkat harus login ulang
 

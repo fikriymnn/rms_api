@@ -38,3 +38,4 @@ class UserOut(BaseModel):
     role: str
     outlet_id: str | None
     active: bool
+    must_change_password: bool = False

@@ -1,6 +1,7 @@
 import json
 import re
 import time
+import uuid
 
 from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session
@@ -75,6 +76,206 @@ def _next_seq(db: Session) -> int:
     return int(db.execute(text("SELECT LAST_INSERT_ID()")).scalar_one())
 
 
+def _write_doc(
+    db: Session,
+    existing: Doc | None,
+    collection: str,
+    doc_id: str,
+    outlet: str | None,
+    data: dict,
+    updated_at: int,
+    deleted: bool,
+) -> int:
+    seq = _next_seq(db)
+    if existing is None:
+        db.add(
+            Doc(
+                collection=collection,
+                id=doc_id,
+                outlet_id=outlet,
+                data=data,
+                updated_at=updated_at,
+                deleted=deleted,
+                seq=seq,
+            )
+        )
+    else:
+        existing.data = data
+        existing.updated_at = updated_at
+        existing.deleted = deleted
+        existing.seq = seq
+    db.flush()  # agar dokumen kembar dalam satu batch terdeteksi
+    return seq
+
+
+# ---------- efek samping yang dikerjakan server (tidak bisa dipalsukan klien) ----------
+
+
+def _num(v: object) -> float:
+    try:
+        return float(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _record_recipe_history(
+    db: Session,
+    by_id: str,
+    by_name: str,
+    recipe_id: str,
+    old: dict | None,
+    new: dict,
+    now_ms: int,
+    via: str = "",
+) -> None:
+    before, after = (old or {}).get("lines"), new.get("lines")
+    if old is not None and before == after:
+        return  # hanya takaran yang dicatat
+    hid = f"rev_{recipe_id}_{uuid.uuid4().hex[:12]}"
+    data = {
+        "id": hid,
+        "recipeId": recipe_id,
+        "at": now_ms,
+        "by": by_id,
+        "byName": by_name,
+        "before": before,
+        "after": after,
+        "via": via,
+    }
+    _write_doc(db, None, "recipe_history", hid, None, data, now_ms, False)
+
+
+def _deduct_stock(
+    db: Session,
+    actor: User,
+    outlet: str | None,
+    order_id: str,
+    order: dict,
+    now_ms: int,
+) -> None:
+    """Potong stok dari resep saat order dibayar. Idempoten lewat id mutasi."""
+    items = [i for i in (order.get("items") or []) if isinstance(i, dict)]
+    menu_ids = {str(i["menuItemId"]) for i in items if i.get("menuItemId")}
+    if not menu_ids:
+        return
+    recipes = {
+        d.id: d.data
+        for d in db.scalars(
+            select(Doc).where(
+                Doc.collection == "recipes",
+                Doc.id.in_(menu_ids),
+                Doc.deleted.is_(False),
+            )
+        )
+    }
+    used: dict[str, float] = {}
+    for it in items:
+        recipe = recipes.get(str(it.get("menuItemId")))
+        if not recipe:
+            continue
+        portions = _num(it.get("qty"))
+        for line in recipe.get("lines") or []:
+            ing = line.get("ingredientId") if isinstance(line, dict) else None
+            if ing:
+                used[str(ing)] = (
+                    used.get(str(ing), 0.0) + _num(line.get("qty")) * portions
+                )
+    paid_at = int(_num(order.get("paidAt")) or now_ms)
+    for ing, qty in used.items():
+        if qty <= 0:
+            continue
+        move_id = f"sale_{order_id}_{ing}"
+        if db.get(Doc, ("stock_moves", move_id)) is not None:
+            continue
+        data = {
+            "id": move_id,
+            "ingredientId": ing,
+            "type": "sale",
+            "qty": -qty,
+            "at": paid_at,
+            "unitCost": None,
+            "orderId": order_id,
+            "note": str(order.get("number") or ""),
+            "userName": actor.name,
+        }
+        _write_doc(db, None, "stock_moves", move_id, outlet, data, now_ms, False)
+
+
+def _publish_proposal(
+    db: Session, actor: User, proposal_id: str, p: dict, now_ms: int
+) -> None:
+    """Usulan disetujui owner: terbitkan menu (dan resep) di semua outlet, satu transaksi."""
+    final_price = int(_num(p.get("finalPrice")))
+    if final_price <= 0:
+        return
+    is_change = p.get("kind") == "change"
+    item_id = str(p.get("targetId")) if is_change else proposal_id
+    existing = db.get(Doc, ("menu_items", item_id))
+    if is_change and (existing is None or existing.deleted):
+        return  # menu yang dituju sudah tidak ada: tidak ada yang diterbitkan
+    base = dict(existing.data) if existing is not None else {}
+    item = {
+        **base,
+        "id": item_id,
+        "name": p.get("name") or base.get("name", ""),
+        "category": p.get("category") or base.get("category", ""),
+        "description": (
+            p["description"]
+            if p.get("description") is not None
+            else base.get("description", "")
+        ),
+        "price": final_price,
+        "available": base.get("available", True),
+        "updatedAt": now_ms,
+    }
+    _write_doc(db, existing, "menu_items", item_id, None, item, now_ms, False)
+
+    recipe = p.get("recipe")
+    if isinstance(recipe, list):
+        lines = [
+            {"ingredientId": str(ln["ingredientId"]), "qty": _num(ln.get("qty"))}
+            for ln in recipe
+            if isinstance(ln, dict)
+            and ln.get("ingredientId")
+            and _num(ln.get("qty")) > 0
+        ]
+        old_recipe = db.get(Doc, ("recipes", item_id))
+        new_data = {"id": item_id, "lines": lines}
+        _write_doc(db, old_recipe, "recipes", item_id, None, new_data, now_ms, False)
+        _record_recipe_history(
+            db,
+            str(p.get("submittedBy") or actor.id),
+            str(p.get("submittedByName") or ""),
+            item_id,
+            old_recipe.data if old_recipe is not None else None,
+            new_data,
+            now_ms,
+            via=f"usulan menu (disetujui {actor.name})",
+        )
+
+
+def _after_write(
+    db: Session,
+    actor: User,
+    it: SyncDocIn,
+    old: dict | None,
+    target: str | None,
+    now_ms: int,
+) -> None:
+    prev = (old or {}).get("status")
+    if it.collection == "recipes":
+        _record_recipe_history(db, actor.id, actor.name, it.id, old, it.data, now_ms)
+    elif it.collection == "orders":
+        if it.data.get("status") == "paid" and prev not in ("paid", "refunded"):
+            _deduct_stock(db, actor, target, it.id, it.data, now_ms)
+    elif it.collection == "menu_proposals":
+        if it.data.get("status") == "approved" and prev != "approved":
+            _publish_proposal(db, actor, it.id, it.data, now_ms)
+
+
+# ---------- push ----------
+
+
 def _rejected(it: SyncDocIn, reason: str) -> PushResult:
     return PushResult(
         collection=it.collection, id=it.id, status="rejected", reason=reason
@@ -118,30 +319,17 @@ def _push_one(
             collection=it.collection, id=it.id, status="stale", seq=existing.seq
         )
 
+    old = existing.data if existing is not None else None
     if spec.check is not None:
-        error = spec.check(actor, it.data, existing.data if existing else None)
+        error = spec.check(actor, it.data, old)
         if error:
             return _rejected(it, error)
 
-    seq = _next_seq(db)
-    if existing is None:
-        db.add(
-            Doc(
-                collection=it.collection,
-                id=it.id,
-                outlet_id=target,
-                data=it.data,
-                updated_at=it.updated_at,
-                deleted=it.deleted,
-                seq=seq,
-            )
-        )
-    else:
-        existing.data = it.data
-        existing.updated_at = it.updated_at
-        existing.deleted = it.deleted
-        existing.seq = seq
-    db.flush()  # agar dokumen kembar dalam satu batch terdeteksi
+    seq = _write_doc(
+        db, existing, it.collection, it.id, target, it.data, it.updated_at, it.deleted
+    )
+    if not it.deleted:
+        _after_write(db, actor, it, old, target, now_ms)
     return PushResult(collection=it.collection, id=it.id, status="ok", seq=seq)
 
 

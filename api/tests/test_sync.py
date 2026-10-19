@@ -349,20 +349,20 @@ def test_shift_only_by_owning_cashier(client, db):
     )
 
 
-def test_cashier_stock_moves_only_sales(client, db):
+def test_cashier_cannot_write_stock_moves(client, db):
     world(db)
     ca = auth_header(client, "ca")
     assert (
         push(client, ca, [d("stock_moves", "m1", {"id": "m1", "type": "purchase"})])[0][
-            "status"
+            "reason"
         ]
-        == "rejected"
+        == "forbidden"
     )
     assert (
         push(client, ca, [d("stock_moves", "m2", {"id": "m2", "type": "sale"})])[0][
-            "status"
+            "reason"
         ]
-        == "ok"
+        == "forbidden"
     )
 
 

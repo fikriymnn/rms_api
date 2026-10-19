@@ -27,7 +27,7 @@ def can_manage(actor: User, target: User) -> bool:
 def creatable_roles(actor: User) -> set[str]:
     """Role yang boleh dibuat/diberikan oleh actor."""
     if actor.role == Role.owner.value:
-        return {Role.manager.value} | STAFF_VALUES
+        return {Role.manager.value, Role.head_chef.value} | STAFF_VALUES
     if actor.role == Role.manager.value:
         return set(STAFF_VALUES)
     return set()

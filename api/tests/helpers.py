@@ -1,6 +1,8 @@
 from app.features.outlets.models import Outlet
 from app.features.users import service as users_service
 from app.features.users.roles import Role
+import time
+from app.core.config import settings
 
 PASSWORD = "rahasia123"
 
@@ -13,7 +15,9 @@ def make_outlet(db, name="Outlet Uji"):
     return o
 
 
-def make_user(db, username, role=Role.cashier, outlet_id=None, active=True):
+def make_user(
+    db, username, role=Role.cashier, outlet_id=None, active=True, consent=True
+):
     u = users_service.create_user(
         db,
         username=username,
@@ -24,7 +28,10 @@ def make_user(db, username, role=Role.cashier, outlet_id=None, active=True):
     )
     if not active:
         u.active = False
-        db.commit()
+    if consent:
+        u.attendance_consent_version = settings.attendance_consent_version
+        u.attendance_consent_at = int(time.time() * 1000)
+    db.commit()
     return u
 
 

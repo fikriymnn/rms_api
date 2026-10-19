@@ -59,7 +59,10 @@ def change_password(
 ):
     if not verify_password(user.password_hash, data.old_password):
         raise HTTPException(400, "Password lama salah")
+    if data.old_password == data.new_password:
+        raise HTTPException(400, "Password baru harus berbeda dari password lama")
     user.password_hash = hash_password(data.new_password)
+    user.must_change_password = False
     service.revoke_all(
         db, user.id
     )  # sekaligus commit; semua perangkat harus login ulang

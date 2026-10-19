@@ -23,9 +23,19 @@ class AttendanceOut(BaseModel):
     stale: bool  # masuk lebih dari 16 jam lalu dan belum pulang
 
 
+class ConsentIn(BaseModel):
+    version: int
+
+
+class ConsentOut(BaseModel):
+    version: int
+    at: int  # epoch ms, waktu server
+
+
 class MeOut(BaseModel):
     open: AttendanceOut | None
     recent: list[AttendanceOut]
+    consent: ConsentOut | None = None
 
 
 class CorrectionIn(BaseModel):

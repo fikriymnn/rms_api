@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     photo_retention_days: int = 90
     max_gps_accuracy_m: int = 80
     geofence_tolerance_m: int = 10
+    attendance_consent_version: int = 1  # naikkan jika teks persetujuan berubah
 
 
 settings = Settings()

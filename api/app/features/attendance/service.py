@@ -13,6 +13,7 @@ from . import photos
 from .geo import distance_m
 from .models import Attendance
 from .schemas import AttendanceOut, MeOut, SummaryRow
+from .schemas import AttendanceOut, ConsentOut, MeOut, SummaryRow
 
 STALE_MS = 16 * 3600 * 1000
 MAX_FUTURE_MS = 2 * 60 * 1000
@@ -91,6 +92,8 @@ def clock(
     if actor.outlet_id is None:
         raise Forbidden("Akun ini tidak terikat outlet, tidak melakukan absensi")
 
+    if actor.attendance_consent_version != settings.attendance_consent_version:
+        raise Forbidden("Persetujuan data absensi belum diberikan")
     # kirim ulang event yang sama -> kembalikan hasil sebelumnya (idempoten)
     dup = db.scalar(
         select(Attendance).where(
@@ -196,9 +199,18 @@ def me(db: Session, actor: User) -> MeOut:
     ).all()
     outs = [to_out(r, actor.name, now) for r in rows]
     open_rec = _open_record(db, actor.id, now)
+    consent = (
+        ConsentOut(
+            version=actor.attendance_consent_version,
+            at=actor.attendance_consent_at or 0,
+        )
+        if actor.attendance_consent_version == settings.attendance_consent_version
+        else None
+    )
     return MeOut(
         open=next((o for o in outs if open_rec and o.id == open_rec.id), None),
         recent=outs,
+        consent=consent,
     )
 
 
@@ -371,3 +383,13 @@ def purge_old_photos(db: Session, days: int) -> int:
         r.out_photo = None
     db.commit()
     return len(rows)
+
+
+def give_consent(db: Session, actor: User, version: int) -> ConsentOut:
+    if version != settings.attendance_consent_version:
+        raise BadRequest("Versi persetujuan tidak sesuai. Perbarui aplikasi Anda.")
+    actor.attendance_consent_version = version
+    actor.attendance_consent_at = now_ms()
+    db.commit()
+    db.refresh(actor)
+    return ConsentOut(version=version, at=actor.attendance_consent_at)
