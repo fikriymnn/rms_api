@@ -4,6 +4,7 @@ from typing import Literal
 
 from app.features.users.models import User
 from app.features.users.roles import Role
+from .dbrules import receipt_precheck
 
 ALL = frozenset(r.value for r in Role)
 OWNER = frozenset({Role.owner.value})
@@ -14,6 +15,7 @@ FRONT = SALES | {Role.waiter.value}
 INVENTORY = MGMT | {Role.warehouse.value}
 KITCHEN_SEES = FRONT | {Role.kitchen.value, Role.head_chef.value}
 RECIPE_READ = MGMT | CHEF
+PURCHASING = INVENTORY | CHEF  # owner, manager, gudang, head chef
 NOBODY: frozenset[str] = frozenset()  # hanya server yang menulis
 
 # (actor, data baru, data lama atau None) -> pesan penolakan atau None
@@ -28,6 +30,7 @@ class Spec:
     append_only: bool = False
     check: Check | None = None
     read_filter: Callable[[User, dict], bool] | None = None
+    precheck: Callable[..., str | None] | None = None  # pemeriksaan yang butuh database
 
 
 def _positive(v: object) -> bool:
@@ -115,6 +118,60 @@ def _proposal_check(actor: User, data: dict, old: dict | None) -> str | None:
     return None
 
 
+_PO_STATUSES = {"draft", "pending", "ordered", "closed", "cancelled", "rejected"}
+_PO_LOCKED = ("lines", "supplierId", "supplierName", "number", "createdBy", "total")
+
+
+def _same(a: object, b: object) -> bool:
+    return (a or None) == (b or None)
+
+
+def _po_check(actor: User, data: dict, old: dict | None) -> str | None:
+    """Status 'pending'/'rejected' hanya diatur server (mesin persetujuan)."""
+    status = data.get("status")
+    if status not in _PO_STATUSES:
+        return "status PO tidak valid"
+    owner = actor.role == Role.owner.value
+    if old is None:
+        if status != "draft" and not (owner and status == "ordered"):
+            return "PO baru harus berstatus draft (pengajuan lewat persetujuan)"
+        if data.get("createdBy") != actor.id:
+            return "PO harus dibuat atas nama Anda sendiri"
+        return None
+    old_status = old.get("status")
+    if old_status in ("pending", "rejected"):
+        return "PO sedang atau sudah melalui persetujuan: tidak dapat diubah dari perangkat"
+    if old_status == "draft":
+        if (
+            not owner
+            and not _same(old.get("createdBy"), actor.id)
+            and old.get("createdBy")
+        ):
+            return "draft PO milik orang lain"
+        allowed = {"draft", "cancelled"} | ({"ordered"} if owner else set())
+        if status not in allowed:
+            return "status PO tidak boleh diubah langsung"
+        return None
+    # sudah dipesan / ditutup / dibatalkan: isi terkunci
+    for key in _PO_LOCKED:
+        if not _same(data.get(key), old.get(key)):
+            return "isi PO terkunci setelah disetujui"
+    if status == old_status or (
+        old_status == "ordered" and status in ("closed", "cancelled")
+    ):
+        return None
+    return "perubahan status PO tidak valid"
+
+
+def _stock_check(actor: User, data: dict, old: dict | None) -> str | None:
+    kind = data.get("type")
+    if kind == "sale":
+        return "mutasi penjualan hanya dibuat oleh server"
+    if kind == "purchase" and actor.role != Role.owner.value:
+        return "pembelian tanpa PO hanya oleh owner; gunakan PO dan penerimaan barang"
+    return None
+
+
 REGISTRY: dict[str, Spec] = {
     # --- data master: dipakai bersama semua outlet ---
     "menu_items": Spec(
@@ -126,7 +183,7 @@ REGISTRY: dict[str, Spec] = {
         "shared", RECIPE_READ, NOBODY, append_only=True
     ),  # ditulis server
     "ingredients": Spec("shared", INVENTORY | CHEF, OWNER | CHEF),
-    "suppliers": Spec("shared", INVENTORY, OWNER),
+    "suppliers": Spec("shared", PURCHASING, OWNER),
     # --- data per outlet ---
     "menu_availability": Spec("outlet", ALL, SALES | CHEF),
     "tables": Spec("outlet", ALL, MGMT),
@@ -135,10 +192,16 @@ REGISTRY: dict[str, Spec] = {
     "shifts": Spec("outlet", SALES, SALES, check=_shifts_check),
     "audit_logs": Spec("outlet", MGMT, FRONT, append_only=True),
     # mutasi stok: penjualan dibuat server; manual hanya oleh bagian gudang/manajemen
-    "stock_moves": Spec("outlet", INVENTORY | CHEF, INVENTORY, append_only=True),
-    "goods_receipts": Spec("outlet", INVENTORY, INVENTORY, append_only=True),
-    "supplier_payments": Spec("outlet", INVENTORY, INVENTORY, append_only=True),
-    "purchase_orders": Spec("outlet", INVENTORY, INVENTORY),
+    "stock_moves": Spec(
+        "outlet", PURCHASING, INVENTORY, append_only=True, check=_stock_check
+    ),
+    "goods_receipts": Spec(
+        "outlet", PURCHASING, INVENTORY, append_only=True, precheck=receipt_precheck
+    ),
+    "supplier_payments": Spec(
+        "outlet", MGMT, MGMT, append_only=True
+    ),  # hutang: manager dan owner
+    "purchase_orders": Spec("outlet", PURCHASING, PURCHASING, check=_po_check),
     "expenses": Spec(
         "outlet", SALES, SALES, check=_expenses_check, read_filter=_expenses_filter
     ),

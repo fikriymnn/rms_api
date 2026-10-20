@@ -232,7 +232,7 @@ def test_read_permissions(client, db):
         client,
         mgr,
         [
-            d("stock_moves", "m1", {"id": "m1", "type": "purchase", "qty": 5}),
+            d("stock_moves", "m1", {"id": "m1", "type": "waste", "qty": -5}),
             d("audit_logs", "l1"),
             d("orders", "o1"),
             d("tables", "t1"),

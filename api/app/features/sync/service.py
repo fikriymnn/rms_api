@@ -201,6 +201,36 @@ def _deduct_stock(
         _write_doc(db, None, "stock_moves", move_id, outlet, data, now_ms, False)
 
 
+def _create_purchase_moves(
+    db: Session, actor: User, outlet: str | None, gr_id: str, gr: dict, now_ms: int
+) -> None:
+    """Penerimaan barang tercatat -> server membuat mutasi stok masuk (dengan harga beli)."""
+    at = int(_num(gr.get("at")) or now_ms)
+    for ln in gr.get("lines") or []:
+        if not isinstance(ln, dict) or not ln.get("ingredientId"):
+            continue
+        qty = _num(ln.get("qty"))
+        factor = _num(ln.get("factor")) or 1.0
+        if qty <= 0:
+            continue
+        ing = str(ln["ingredientId"])
+        move_id = f"rcv_{gr_id}_{ing}"
+        if db.get(Doc, ("stock_moves", move_id)) is not None:
+            continue
+        data = {
+            "id": move_id,
+            "ingredientId": ing,
+            "type": "purchase",
+            "qty": qty * factor,
+            "at": at,
+            "unitCost": _num(ln.get("unitPrice")) / factor,
+            "orderId": "",
+            "note": f"{gr.get('number', '')} • {gr.get('supplierName', '')}",
+            "userName": actor.name,
+        }
+        _write_doc(db, None, "stock_moves", move_id, outlet, data, now_ms, False)
+
+
 def _publish_proposal(
     db: Session, actor: User, proposal_id: str, p: dict, now_ms: int
 ) -> None:
@@ -271,6 +301,8 @@ def _after_write(
     elif it.collection == "menu_proposals":
         if it.data.get("status") == "approved" and prev != "approved":
             _publish_proposal(db, actor, it.id, it.data, now_ms)
+    elif it.collection == "goods_receipts":
+        _create_purchase_moves(db, actor, target, it.id, it.data, now_ms)
 
 
 # ---------- push ----------
@@ -322,6 +354,11 @@ def _push_one(
     old = existing.data if existing is not None else None
     if spec.check is not None:
         error = spec.check(actor, it.data, old)
+        if error:
+            return _rejected(it, error)
+
+    if spec.precheck is not None:
+        error = spec.precheck(db, actor, it.id, it.data, old, target)
         if error:
             return _rejected(it, error)
 
