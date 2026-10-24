@@ -16,6 +16,9 @@ from app.core.config import settings
 from app.core.database import SessionLocal
 from app.features.attendance import service as attendance_service
 from app.features.attendance.router import router as attendance_router
+from app.features.approvals.router import router as approvals_router
+from app.features.notifications import handlers as _notification_handlers  # noqa: F401
+from app.features.notifications.router import router as notifications_router
 
 log = logging.getLogger("rms")
 
@@ -58,6 +61,8 @@ app.include_router(outlets_router)
 app.include_router(users_router)
 app.include_router(sync_router)
 app.include_router(attendance_router)
+app.include_router(approvals_router)
+app.include_router(notifications_router)
 
 app.add_middleware(
     CORSMiddleware,

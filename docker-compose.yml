@@ -27,11 +27,13 @@ services:
       DATABASE_URL: mysql+pymysql://${MYSQL_USER}:${MYSQL_PASSWORD}@db:3306/${MYSQL_DATABASE}
       WATCHFILES_FORCE_POLLING: "true"   # agar auto-reload jalan di Windows
       JWT_SECRET: ${JWT_SECRET}
+      FCM_SERVICE_ACCOUNT_FILE: ${FCM_SERVICE_ACCOUNT_FILE:-}
     ports:
       - "8000:8000"
     volumes:
       - ./api:/code
       - photos:/data/photos
+      - ./secrets:/run/secrets:ro
   adminer:
     image: adminer
     depends_on:

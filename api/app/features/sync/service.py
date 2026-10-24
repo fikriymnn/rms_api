@@ -14,6 +14,7 @@ from app.features.users.roles import Role
 from .models import Doc
 from .policy import REGISTRY
 from .schemas import PullResponse, PushResult, SyncDocIn, SyncDocOut
+from app.core import events
 
 MAX_DOC_BYTES = 64 * 1024
 MAX_FUTURE_MS = 24 * 3600 * 1000
@@ -106,6 +107,24 @@ def _write_doc(
         existing.seq = seq
     db.flush()  # agar dokumen kembar dalam satu batch terdeteksi
     return seq
+
+
+def lock_counter(db: Session) -> None:
+    """Kunci penghitung seq. Menulis dokumen di luar push() wajib memanggil ini dulu."""
+    db.execute(text("SELECT v FROM counters WHERE name = 'seq' FOR UPDATE"))
+
+
+def upsert_doc(
+    db: Session,
+    collection: str,
+    doc_id: str,
+    outlet: str | None,
+    data: dict,
+    now_ms: int,
+    deleted: bool = False,
+) -> int:
+    existing = db.get(Doc, (collection, doc_id))
+    return _write_doc(db, existing, collection, doc_id, outlet, data, now_ms, deleted)
 
 
 # ---------- efek samping yang dikerjakan server (tidak bisa dipalsukan klien) ----------
@@ -293,14 +312,35 @@ def _after_write(
     now_ms: int,
 ) -> None:
     prev = (old or {}).get("status")
+    status = it.data.get("status")
     if it.collection == "recipes":
         _record_recipe_history(db, actor.id, actor.name, it.id, old, it.data, now_ms)
     elif it.collection == "orders":
-        if it.data.get("status") == "paid" and prev not in ("paid", "refunded"):
+        if status == "paid" and prev not in ("paid", "refunded"):
             _deduct_stock(db, actor, target, it.id, it.data, now_ms)
+        _queue_order_event(db, target, it.id, old, it.data)
     elif it.collection == "menu_proposals":
-        if it.data.get("status") == "approved" and prev != "approved":
+        name = str(it.data.get("name") or "")
+        if status == "approved" and prev != "approved":
             _publish_proposal(db, actor, it.id, it.data, now_ms)
+        if old is None and status == "pending":
+            _queue_event(
+                db,
+                "proposal.submitted",
+                proposal_id=it.id,
+                name=name,
+                by_name=actor.name,
+            )
+        elif prev == "pending" and status in ("approved", "rejected"):
+            _queue_event(
+                db,
+                "proposal.decided",
+                proposal_id=it.id,
+                name=name,
+                status=status,
+                requested_by=it.data.get("submittedBy"),
+                note=str(it.data.get("decisionNote") or ""),
+            )
     elif it.collection == "goods_receipts":
         _create_purchase_moves(db, actor, target, it.id, it.data, now_ms)
 
@@ -379,4 +419,62 @@ def push(
     now_ms = int(time.time() * 1000)
     results = [_push_one(db, actor, outlet, it, now_ms) for it in items]
     db.commit()
+    for name, payload in db.info.pop("events", []):
+        events.emit(name, db=db, **payload)
     return results
+
+
+def _queue_event(db: Session, event: str, /, **payload) -> None:
+    """Kejadian dikirim SESUDAH commit (lihat push)."""
+    db.info.setdefault("events", []).append((event, payload))
+
+
+def _item_key(it: dict) -> str:
+    return str(it.get("id") or f"{it.get('menuItemId')}|{it.get('note', '')}")
+
+
+def _queue_order_event(
+    db: Session, outlet: str | None, order_id: str, old: dict | None, new: dict
+) -> None:
+    """Item yang baru ditambahkan ke pesanan terbuka -> kabari dapur."""
+    if new.get("status") != "open":
+        return
+    old_qty = {
+        _item_key(i): _num(i.get("qty"))
+        for i in ((old or {}).get("items") or [])
+        if isinstance(i, dict)
+    }
+    added = []
+    for it in new.get("items") or []:
+        if not isinstance(it, dict):
+            continue
+        delta = _num(it.get("qty")) - old_qty.get(_item_key(it), 0.0)
+        if delta > 0:
+            added.append([str(it.get("name") or "Item"), delta])
+    if not added:
+        return
+    if new.get("type") == "takeaway":
+        where = "Takeaway"
+    else:
+        table = (
+            db.get(Doc, ("tables", str(new["tableId"]))) if new.get("tableId") else None
+        )
+        label = (
+            str(table.data.get("name") or table.data.get("number") or "")
+            if table is not None
+            else ""
+        )
+        where = (
+            (label if label.lower().startswith("meja") else f"Meja {label}")
+            if label
+            else "Dine-in"
+        )
+    _queue_event(
+        db,
+        "order.items_added",
+        outlet_id=outlet,
+        order_id=order_id,
+        is_new=old is None,
+        where=where,
+        items=added,
+    )

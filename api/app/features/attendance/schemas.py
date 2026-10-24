@@ -55,3 +55,8 @@ class SummaryRow(BaseModel):
     records: int
     minutes: int
     open_count: int
+
+
+class RevokeOut(BaseModel):
+    revoked_at: int
+    photos_deleted: int

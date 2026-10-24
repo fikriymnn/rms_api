@@ -17,6 +17,7 @@ from .schemas import (
     CorrectionIn,
     MeOut,
     ReviewIn,
+    RevokeOut,
     SummaryRow,
 )
 
@@ -147,3 +148,8 @@ def review_record(
 @router.post("/consent", response_model=ConsentOut)
 def give_consent(data: ConsentIn, actor: CurrentUser, db: Session = Depends(get_db)):
     return service.give_consent(db, actor, data.version)
+
+
+@router.post("/consent/revoke", response_model=RevokeOut)
+def revoke_consent(actor: CurrentUser, db: Session = Depends(get_db)):
+    return service.revoke_consent(db, actor)

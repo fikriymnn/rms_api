@@ -11,9 +11,10 @@ from app.features.users.roles import Role
 
 from . import photos
 from .geo import distance_m
-from .models import Attendance
+from .models import Attendance, ConsentEvent
 from .schemas import AttendanceOut, MeOut, SummaryRow
-from .schemas import AttendanceOut, ConsentOut, MeOut, SummaryRow
+from .schemas import AttendanceOut, ConsentOut, MeOut, SummaryRow, RevokeOut
+from .photos import delete_photo
 
 STALE_MS = 16 * 3600 * 1000
 MAX_FUTURE_MS = 2 * 60 * 1000
@@ -390,6 +391,43 @@ def give_consent(db: Session, actor: User, version: int) -> ConsentOut:
         raise BadRequest("Versi persetujuan tidak sesuai. Perbarui aplikasi Anda.")
     actor.attendance_consent_version = version
     actor.attendance_consent_at = now_ms()
+    db.add(
+        ConsentEvent(
+            user_id=actor.id,
+            kind="granted",
+            version=version,
+            at=actor.attendance_consent_at,
+        )
+    )
     db.commit()
     db.refresh(actor)
     return ConsentOut(version=version, at=actor.attendance_consent_at)
+
+
+def revoke_consent(db: Session, user: User, *, by: str | None = None) -> RevokeOut:
+    """Cabut persetujuan: hentikan pemrosesan, hapus foto wajah, dan buang koordinat presisi.
+    Jam masuk/pulang, jarak, tanda, dan status tinjauan dipertahankan untuk catatan kerja.
+    """
+    now = now_ms()
+    paths: list[str] = []
+    for a in db.scalars(select(Attendance).where(Attendance.user_id == user.id)):
+        paths += [p for p in (a.in_photo, a.out_photo) if p]
+        a.in_photo = a.out_photo = None
+        a.in_lat = a.in_lng = a.in_accuracy = None
+        a.out_lat = a.out_lng = a.out_accuracy = None
+    user.attendance_consent_at = None
+    user.attendance_consent_version = None
+    db.add(
+        ConsentEvent(
+            user_id=user.id,
+            kind="revoked",
+            version=None,
+            at=now,
+            photos_deleted=len(paths),
+            by_user=by,
+        )
+    )
+    db.commit()
+    for rel in paths:  # file dihapus sesudah basis data berubah
+        delete_photo(rel)
+    return RevokeOut(revoked_at=now, photos_deleted=len(paths))

@@ -11,3 +11,5 @@ pytest
 httpx
 pillow
 python-multipart
+google-auth
+requests

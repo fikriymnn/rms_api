@@ -66,3 +66,20 @@ class Attendance(Base):
         Index("idx_att_outlet_in", "outlet_id", "clock_in_at"),
         Index("idx_att_user_in", "user_id", "clock_in_at"),
     )
+
+
+class ConsentEvent(Base):
+    """Bukti persetujuan dan pencabutannya. Hanya ditambah, tidak memuat data biometrik."""
+
+    __tablename__ = "consent_events"
+    __table_args__ = (Index("idx_consent_user", "user_id", "at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    kind: Mapped[str] = mapped_column(String(10))  # granted | revoked
+    version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    at: Mapped[int] = mapped_column(BigInteger)
+    photos_deleted: Mapped[int] = mapped_column(Integer, default=0)
+    by_user: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )  # pelaksana; CLI: kosong

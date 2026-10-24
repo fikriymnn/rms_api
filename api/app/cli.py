@@ -37,6 +37,50 @@ def purge_photos(args: argparse.Namespace) -> None:
     print(f"{n} catatan absensi dibersihkan dari foto")
 
 
+def push_test(args: argparse.Namespace) -> None:
+    from sqlalchemy import select
+
+    from app.features.notifications import fcm
+    from app.features.notifications.models import DeviceToken
+
+    if not fcm.is_configured():
+        sys.exit(
+            "FCM belum dikonfigurasi (FCM_SERVICE_ACCOUNT_FILE tidak ada atau berkas tidak ditemukan)"
+        )
+    with SessionLocal() as db:
+        user = users_service.get_by_username(db, args.username)
+        if user is None:
+            sys.exit("Akun tidak ditemukan")
+        tokens = [
+            t.token
+            for t in db.scalars(
+                select(DeviceToken).where(DeviceToken.user_id == user.id)
+            )
+        ]
+    if not tokens:
+        sys.exit("Akun ini belum punya perangkat terdaftar. Login di aplikasi dulu.")
+    for t in tokens:
+        result = fcm.send(
+            {
+                "token": t,
+                "title": "Tes notifikasi",
+                "body": "FCM berfungsi.",
+                "channel": args.channel,
+                "data": {"type": "test", "id": ""},
+            }
+        )
+        print(f"{t[:12]}… -> {result}")
+
+
+def revoke_consent(args: argparse.Namespace) -> None:
+    with SessionLocal() as db:
+        user = users_service.get_by_username(db, args.username)
+        if user is None:
+            sys.exit("Akun tidak ditemukan")
+        out = attendance_service.revoke_consent(db, user)
+    print(f"Persetujuan dicabut. {out.photos_deleted} foto dihapus.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -51,6 +95,20 @@ def main() -> None:
     )
     p.add_argument("--days", type=int, default=settings.photo_retention_days)
     p.set_defaults(func=purge_photos)
+    t = sub.add_parser(
+        "push-test", help="Kirim notifikasi uji ke perangkat sebuah akun"
+    )
+    t.add_argument("--username", required=True)
+    t.add_argument(
+        "--channel", default="approvals", choices=["approvals", "kitchen_orders"]
+    )
+    t.set_defaults(func=push_test)
+    rc = sub.add_parser(
+        "revoke-consent",
+        help="Cabut persetujuan absensi sebuah akun dan hapus foto wajahnya",
+    )
+    rc.add_argument("--username", required=True)
+    rc.set_defaults(func=revoke_consent)
     args = parser.parse_args()
     args.func(args)
 

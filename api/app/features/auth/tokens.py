@@ -2,6 +2,7 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_token
+from app.features.notifications.service import drop_user_tokens
 
 from .models import RefreshToken
 
@@ -23,4 +24,7 @@ def revoke_all(db: Session, user_id: str) -> None:
         )  # noqa: E712
         .values(revoked=True)
     )
+    drop_user_tokens(
+        db, user_id
+    )  # perangkat tidak boleh lagi menerima notifikasi akun ini
     db.commit()
