@@ -324,3 +324,118 @@ def test_po_submission_validation(client, db):
     act(client, mgr, aid, "approve")
     act(client, boss, aid, "approve")
     assert submit(client, wh).status_code == 409  # sudah dipesan
+
+
+def test_pending_scope_shows_everything_still_waiting(client, db):
+    prepare(client, db)
+    wh, mgr_a, mgr_b, boss = (
+        auth_header(client, u) for u in ("wh", "mgr_a", "mgr_b", "boss")
+    )
+    a1 = submit(client, wh).json()["id"]
+
+    def pend(h):
+        return {
+            x["id"] for x in client.get("/approvals?scope=pending", headers=h).json()
+        }
+
+    assert pend(boss) == {a1}  # owner melihat yang masih di tahap 1
+    assert pend(mgr_a) == {a1} and pend(mgr_b) == set()
+    assert pend(wh) == set()
+    act(client, mgr_a, a1, "approve")
+    assert pend(boss) == {a1}
+    act(client, boss, a1, "approve")
+    assert pend(boss) == set()
+
+
+def test_ingredient_requests_follow_the_same_chain(client, db):
+    prepare(client, db)
+    wh, mgr, chef, boss = (
+        auth_header(client, u) for u in ("wh", "mgr_a", "chef", "boss")
+    )
+    new = {
+        "type": "ingredient",
+        "ingredient": {
+            "action": "create",
+            "name": "Beras",
+            "unit": "g",
+            "min_stock": 5000,
+            "buy_unit": "kg",
+            "buy_factor": 1000,
+        },
+    }
+    r = client.post("/approvals", json=new, headers=wh)
+    assert r.status_code == 201 and r.json()["status"] == "pending_l1"
+    aid = r.json()["id"]
+    assert act(client, mgr, aid, "approve").status_code == 200
+    assert act(client, boss, aid, "approve").status_code == 200
+
+    ings = {
+        x["id"]: x["data"]
+        for x in pull(client, chef)["docs"]
+        if x["collection"] == "ingredients"
+    }
+    assert len(ings) == 1
+    iid, data = next(iter(ings.items()))
+    assert data["name"] == "Beras" and data["unit"] == "g" and data["minStock"] == 5000
+    assert data["buyUnit"] == "kg" and data["buyFactor"] == 1000
+
+    dup = {
+        "type": "ingredient",
+        "ingredient": {"action": "create", "name": "beras", "unit": "g"},
+    }
+    assert client.post("/approvals", json=dup, headers=wh).status_code == 409
+    upd = {
+        "type": "ingredient",
+        "ingredient": {
+            "action": "update",
+            "ingredient_id": iid,
+            "name": "Beras Premium",
+            "unit": "g",
+            "min_stock": 8000,
+            "buy_unit": "kg",
+            "buy_factor": 1000,
+        },
+    }
+    r2 = client.post("/approvals", json=upd, headers=mgr)
+    assert (
+        r2.status_code == 201 and r2.json()["status"] == "pending_owner"
+    )  # manager langsung ke owner
+    assert act(client, boss, r2.json()["id"], "approve").status_code == 200
+    got = {
+        x["id"]: x["data"]
+        for x in pull(client, wh)["docs"]
+        if x["collection"] == "ingredients"
+    }
+    assert got[iid]["name"] == "Beras Premium" and got[iid]["minStock"] == 8000
+
+    bad_unit = {
+        "type": "ingredient",
+        "ingredient": {
+            "action": "update",
+            "ingredient_id": iid,
+            "name": "Beras Premium",
+            "unit": "kg",
+        },
+    }
+    assert client.post("/approvals", json=bad_unit, headers=chef).status_code == 400
+    missing = {
+        "type": "ingredient",
+        "ingredient": {
+            "action": "update",
+            "ingredient_id": "tidak-ada",
+            "name": "X",
+            "unit": "g",
+        },
+    }
+    assert client.post("/approvals", json=missing, headers=chef).status_code == 404
+    empty = {
+        "type": "ingredient",
+        "ingredient": {"action": "create", "name": "", "unit": "g"},
+    }
+    assert client.post("/approvals", json=empty, headers=wh).status_code == 422
+    assert (
+        client.post(
+            "/approvals", json=new, headers=auth_header(client, "ca")
+        ).status_code
+        == 403
+    )

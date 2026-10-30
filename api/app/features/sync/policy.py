@@ -2,21 +2,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
+from app.features.roles.service import can, has_any
 from app.features.users.models import User
-from app.features.users.roles import Role
 from .dbrules import receipt_precheck
 
-ALL = frozenset(r.value for r in Role)
-OWNER = frozenset({Role.owner.value})
-MGMT = frozenset({Role.owner.value, Role.manager.value})
-CHEF = frozenset({Role.head_chef.value})
-SALES = MGMT | {Role.cashier.value}
-FRONT = SALES | {Role.waiter.value}
-INVENTORY = MGMT | {Role.warehouse.value}
-KITCHEN_SEES = FRONT | {Role.kitchen.value, Role.head_chef.value}
-RECIPE_READ = MGMT | CHEF
-PURCHASING = INVENTORY | CHEF  # owner, manager, gudang, head chef
-NOBODY: frozenset[str] = frozenset()  # hanya server yang menulis
+Perms = tuple[str, ...]  # lolos jika user memegang SALAH SATU izin
+NOBODY: Perms = ()  # tidak ada yang boleh: hanya server yang menulis
 
 # (actor, data baru, data lama atau None) -> pesan penolakan atau None
 Check = Callable[[User, dict, dict | None], str | None]
@@ -25,12 +16,32 @@ Check = Callable[[User, dict, dict | None], str | None]
 @dataclass(frozen=True)
 class Spec:
     scope: Literal["shared", "outlet"]  # shared = dipakai semua outlet
-    read: frozenset[str]
-    write: frozenset[str]
+    read: Perms
+    create: Perms = ()
+    update: Perms = ()
+    delete: Perms = ()
     append_only: bool = False
     check: Check | None = None
     read_filter: Callable[[User, dict], bool] | None = None
     precheck: Callable[..., str | None] | None = None  # pemeriksaan yang butuh database
+
+
+def crud(feature: str, **override: Perms) -> dict[str, Perms]:
+    """read/create/update/delete = izin "<fitur>.<aksi>"; bisa ditimpa per aksi."""
+    base = {a: (f"{feature}.{a}",) for a in ("read", "create", "update", "delete")}
+    return base | override
+
+
+def any_write(spec: "Spec") -> Perms:
+    return spec.create + spec.update + spec.delete
+
+
+def op_perms(spec: "Spec", *, is_new: bool, deleting: bool) -> Perms:
+    if spec.append_only:  # kirim ulang yang identik tetap sah bagi pembuatnya
+        return spec.create
+    if deleting:
+        return spec.delete
+    return spec.create if is_new else spec.update
 
 
 def _positive(v: object) -> bool:
@@ -39,21 +50,21 @@ def _positive(v: object) -> bool:
 
 def _orders_check(actor: User, data: dict, old: dict | None) -> str | None:
     old = old or {}
-    if (data.get("discount") or 0) != (
-        old.get("discount") or 0
-    ) and actor.role not in MGMT:
-        return "diskon hanya oleh manager/owner"
+    if (data.get("discount") or 0) != (old.get("discount") or 0) and not can(
+        actor, "orders.discount"
+    ):
+        return "diskon hanya oleh role yang berhak"
     if (
         data.get("status") == "refunded"
         and old.get("status") != "refunded"
-        and actor.role not in MGMT
+        and not can(actor, "orders.refund")
     ):
-        return "refund hanya oleh manager/owner"
+        return "refund hanya oleh role yang berhak"
     return None
 
 
 def _shifts_check(actor: User, data: dict, old: dict | None) -> str | None:
-    if actor.role == Role.cashier.value:
+    if not can(actor, "shifts.manage_all"):
         if data.get("cashierId") != actor.id or (
             old and old.get("cashierId") != actor.id
         ):
@@ -62,7 +73,7 @@ def _shifts_check(actor: User, data: dict, old: dict | None) -> str | None:
 
 
 def _expenses_check(actor: User, data: dict, old: dict | None) -> str | None:
-    if actor.role == Role.cashier.value:
+    if not can(actor, "expenses.manage_all"):
         if data.get("fromDrawer") is not True or (
             old and old.get("fromDrawer") is not True
         ):
@@ -71,7 +82,7 @@ def _expenses_check(actor: User, data: dict, old: dict | None) -> str | None:
 
 
 def _expenses_filter(actor: User, data: dict) -> bool:
-    return actor.role != Role.cashier.value or data.get("fromDrawer") is True
+    return can(actor, "expenses.manage_all") or data.get("fromDrawer") is True
 
 
 _PROPOSAL_STATUSES = {"pending", "approved", "rejected", "withdrawn"}
@@ -92,19 +103,19 @@ def _proposal_check(actor: User, data: dict, old: dict | None) -> str | None:
     if old is not None and old.get("status") != "pending":
         return "usulan yang sudah diputuskan tidak bisa diubah"
 
-    if actor.role == Role.owner.value:
+    if can(actor, "proposals.decide"):
         if status in ("approved", "rejected"):
             if old is None or old.get("status") != "pending":
                 return "hanya usulan yang menunggu yang bisa diputuskan"
             if data.get("decidedBy") != actor.id:
-                return "decidedBy harus akun owner yang memutuskan"
+                return "decidedBy harus akun yang memutuskan"
             if status == "approved" and not _positive(data.get("finalPrice")):
                 return "harga final wajib diisi saat menyetujui"
             if status == "rejected" and not str(data.get("decisionNote") or "").strip():
                 return "alasan penolakan wajib diisi"
         return None
 
-    # head chef
+    # pengaju (mis. head chef)
     if status in ("approved", "rejected"):
         return "hanya owner yang boleh memutuskan usulan"
     if data.get("finalPrice") is not None or data.get("decidedBy"):
@@ -131,7 +142,7 @@ def _po_check(actor: User, data: dict, old: dict | None) -> str | None:
     status = data.get("status")
     if status not in _PO_STATUSES:
         return "status PO tidak valid"
-    owner = actor.role == Role.owner.value
+    owner = can(actor, "purchase_orders.direct_order")
     if old is None:
         if status != "draft" and not (owner and status == "ordered"):
             return "PO baru harus berstatus draft (pengajuan lewat persetujuan)"
@@ -167,43 +178,89 @@ def _stock_check(actor: User, data: dict, old: dict | None) -> str | None:
     kind = data.get("type")
     if kind == "sale":
         return "mutasi penjualan hanya dibuat oleh server"
-    if kind == "purchase" and actor.role != Role.owner.value:
-        return "pembelian tanpa PO hanya oleh owner; gunakan PO dan penerimaan barang"
+    if kind == "purchase" and not can(actor, "stock.purchase_direct"):
+        return "pembelian tanpa PO butuh izin khusus; gunakan PO dan penerimaan barang"
     return None
 
 
 REGISTRY: dict[str, Spec] = {
     # --- data master: dipakai bersama semua outlet ---
-    "menu_items": Spec(
-        "shared", ALL, OWNER
-    ),  # menu aktif: hanya owner (atau lewat persetujuan)
-    "menu_proposals": Spec("shared", OWNER | CHEF, OWNER | CHEF, check=_proposal_check),
-    "recipes": Spec("shared", RECIPE_READ, OWNER | CHEF),
-    "recipe_history": Spec(
-        "shared", RECIPE_READ, NOBODY, append_only=True
-    ),  # ditulis server
-    "ingredients": Spec("shared", INVENTORY | CHEF, OWNER | CHEF),
-    "suppliers": Spec("shared", PURCHASING, OWNER),
+    "menu_items": Spec("shared", **crud("menu")),
+    "menu_proposals": Spec(
+        "shared",
+        read=("proposals.read",),
+        create=("proposals.create",),
+        update=("proposals.update", "proposals.decide"),
+        delete=("proposals.update", "proposals.decide"),
+        check=_proposal_check,
+    ),
+    "recipes": Spec("shared", **crud("recipes")),
+    "recipe_history": Spec("shared", read=("recipes.read",), append_only=True),
+    "ingredients": Spec("shared", **crud("ingredients")),
+    "suppliers": Spec("shared", **crud("suppliers")),
     # --- data per outlet ---
-    "menu_availability": Spec("outlet", ALL, SALES | CHEF),
-    "tables": Spec("outlet", ALL, MGMT),
-    "orders": Spec("outlet", KITCHEN_SEES, FRONT, check=_orders_check),
-    "item_status": Spec("outlet", KITCHEN_SEES, KITCHEN_SEES),
-    "shifts": Spec("outlet", SALES, SALES, check=_shifts_check),
-    "audit_logs": Spec("outlet", MGMT, FRONT, append_only=True),
-    # mutasi stok: penjualan dibuat server; manual hanya oleh bagian gudang/manajemen
+    "menu_availability": Spec(
+        "outlet",
+        read=("menu.read",),
+        create=("menu.availability",),
+        update=("menu.availability",),
+        delete=("menu.availability",),
+    ),
+    "tables": Spec("outlet", **crud("tables")),
+    # kasir/waiter/dapur melihat pesanan; status per item ikut izin pesanan/dapur
+    "orders": Spec("outlet", **crud("orders"), check=_orders_check),
+    "item_status": Spec(
+        "outlet",
+        read=("orders.read", "kitchen.read"),
+        create=("kitchen.update", "orders.update"),
+        update=("kitchen.update", "orders.update"),
+        delete=("kitchen.update", "orders.update"),
+    ),
+    "shifts": Spec(
+        "outlet",
+        read=("shifts.read",),
+        create=("shifts.create",),
+        update=("shifts.update",),
+        delete=("shifts.update",),
+        check=_shifts_check,
+    ),
+    "audit_logs": Spec(
+        "outlet", read=("audit.read",), create=("audit.create",), append_only=True
+    ),
+    # mutasi stok: penjualan dibuat server; manual hanya yang berizin
     "stock_moves": Spec(
-        "outlet", PURCHASING, INVENTORY, append_only=True, check=_stock_check
+        "outlet",
+        read=("stock.read",),
+        create=("stock.create",),
+        append_only=True,
+        check=_stock_check,
     ),
     "goods_receipts": Spec(
-        "outlet", PURCHASING, INVENTORY, append_only=True, precheck=receipt_precheck
+        "outlet",
+        read=("goods_receipts.read",),
+        create=("goods_receipts.create",),
+        append_only=True,
+        precheck=receipt_precheck,
     ),
     "supplier_payments": Spec(
-        "outlet", MGMT, MGMT, append_only=True
-    ),  # hutang: manager dan owner
-    "purchase_orders": Spec("outlet", PURCHASING, PURCHASING, check=_po_check),
-    "expenses": Spec(
-        "outlet", SALES, SALES, check=_expenses_check, read_filter=_expenses_filter
+        "outlet",
+        read=("supplier_payments.read",),
+        create=("supplier_payments.create",),
+        append_only=True,
     ),
-    "reservations": Spec("outlet", FRONT, FRONT),
+    "purchase_orders": Spec("outlet", **crud("purchase_orders"), check=_po_check),
+    "expenses": Spec(
+        "outlet",
+        **crud("expenses"),
+        check=_expenses_check,
+        read_filter=_expenses_filter,
+    ),
+    "reservations": Spec("outlet", **crud("reservations")),
+    "table_holds": Spec(
+        "outlet",
+        read=("tables.hold",),
+        create=("tables.hold",),
+        update=("tables.hold",),
+        delete=("tables.hold",),
+    ),
 }

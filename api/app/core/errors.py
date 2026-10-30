@@ -22,3 +22,7 @@ class NotFound(AppError):
 
 class Conflict(AppError):
     status_code = 409
+
+
+class Unprocessable(AppError):
+    status_code = 422

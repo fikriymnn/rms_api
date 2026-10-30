@@ -12,7 +12,8 @@ from app.features.users.models import User
 from app.features.users.roles import Role
 
 from .models import Doc
-from .policy import REGISTRY
+from app.features.roles.service import has_any
+from .policy import REGISTRY, any_write, op_perms
 from .schemas import PullResponse, PushResult, SyncDocIn, SyncDocOut
 from app.core import events
 
@@ -35,16 +36,16 @@ def resolve_outlet(db: Session, actor: User, requested: str | None) -> str | Non
 
 
 def readable_collections(actor: User) -> list[str]:
-    return [c for c, s in REGISTRY.items() if actor.role in s.read]
+    return [c for c, s in REGISTRY.items() if has_any(actor, s.read)]
 
 
 def writable_collections(actor: User) -> list[str]:
-    return [c for c, s in REGISTRY.items() if actor.role in s.write]
+    return [c for c, s in REGISTRY.items() if has_any(actor, any_write(s))]
 
 
 def _visible(actor: User, doc: Doc) -> bool:
     spec = REGISTRY.get(doc.collection)
-    if spec is None or actor.role not in spec.read:
+    if spec is None or not has_any(actor, spec.read):
         return False
     return spec.read_filter is None or spec.read_filter(actor, doc.data)
 
@@ -360,7 +361,8 @@ def _push_one(
     spec = REGISTRY.get(it.collection)
     if spec is None:
         return _rejected(it, "unknown_collection")
-    if actor.role not in spec.write:
+    # pemeriksaan kasar: punya izin menulis apa pun di koleksi ini?
+    if not has_any(actor, any_write(spec)):
         return _rejected(it, "forbidden")
     if not _ID_RE.match(it.id):
         return _rejected(it, "bad_id")
@@ -376,6 +378,9 @@ def _push_one(
     existing = db.get(Doc, (it.collection, it.id))
     if existing is not None and existing.outlet_id != target:
         return _rejected(it, "id_conflict")  # jangan menimpa dokumen outlet lain
+    # izin per operasi: tambah / ubah / hapus
+    if not has_any(actor, op_perms(spec, is_new=existing is None, deleting=it.deleted)):
+        return _rejected(it, "forbidden")
 
     if spec.append_only:
         if existing is not None:
@@ -436,8 +441,10 @@ def _item_key(it: dict) -> str:
 def _queue_order_event(
     db: Session, outlet: str | None, order_id: str, old: dict | None, new: dict
 ) -> None:
-    """Item yang baru ditambahkan ke pesanan terbuka -> kabari dapur."""
-    if new.get("status") != "open":
+    if new.get("status") not in (
+        "open",
+        "paid",
+    ):  # bayar langsung tetap memberi tahu dapur
         return
     old_qty = {
         _item_key(i): _num(i.get("qty"))

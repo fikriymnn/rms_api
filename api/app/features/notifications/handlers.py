@@ -10,16 +10,17 @@ from app.core import events
 from app.core.utils import new_id
 from app.features.outlets.models import Outlet
 from app.features.users.models import User
-from app.features.users.roles import Role
+from app.features.roles import service as roles_service
 
 from . import push
 from .models import DeviceToken, Notification
 
 log = logging.getLogger("rms.notify")
 
-APPROVERS = (Role.manager.value, Role.head_chef.value)
-KITCHEN = (Role.kitchen.value, Role.head_chef.value)
-OWNER = (Role.owner.value,)
+
+def _holders(db: Session, perm: str) -> tuple[str, ...]:
+    """Penerima ditentukan oleh izin (bukan nama role) agar ikut master role."""
+    return roles_service.role_keys_with(db, perm)
 
 
 @dataclass
@@ -63,10 +64,13 @@ def _approval_submitted(db: Session, p: dict) -> list[Notice]:
     who = f"{requester.name if requester else '-'} ({outlet.name if outlet else '-'})"
     if p["stage"] == "pending_l1":
         users = _users(
-            db, APPROVERS, outlet_id=p["outlet_id"], exclude={p["requested_by"]}
+            db,
+            _holders(db, "approvals.approve_l1"),
+            outlet_id=p["outlet_id"],
+            exclude={p["requested_by"]},
         )
     else:
-        users = _users(db, OWNER)
+        users = _users(db, _holders(db, "approvals.approve_final"))
     return [
         Notice(
             users,
@@ -86,7 +90,7 @@ def _approval_advanced(db: Session, p: dict) -> list[Notice]:
     common = (p["approval_id"],)
     return [
         Notice(
-            _users(db, OWNER),
+            _users(db, _holders(db, "approvals.approve_final")),
             "approval",
             *common,
             "Menunggu persetujuan Anda",
@@ -128,7 +132,7 @@ def _approval_decided(db: Session, p: dict) -> list[Notice]:
 def _proposal_submitted(db: Session, p: dict) -> list[Notice]:
     return [
         Notice(
-            _users(db, OWNER),
+            _users(db, _holders(db, "proposals.decide")),
             "proposal",
             p["proposal_id"],
             "Usulan menu baru",
@@ -164,7 +168,7 @@ def _order_items_added(db: Session, p: dict) -> list[Notice]:
     title = f"{'Pesanan baru' if p['is_new'] else 'Tambahan pesanan'} • {p['where']}"
     return [
         Notice(
-            _users(db, KITCHEN, outlet_id=p["outlet_id"]),
+            _users(db, _holders(db, "kitchen.notify"), outlet_id=p["outlet_id"]),
             "order",
             p["order_id"],
             title,

@@ -9,16 +9,29 @@ from app.core.utils import new_id
 from app.features.outlets.models import Outlet
 from app.features.sync import service as sync_service
 from app.features.sync.models import Doc
+from app.features.roles.service import can
 from app.features.users.models import User
 from app.features.users.roles import Role
 
 from .models import ApprovalRequest
-from .schemas import ApprovalCounts, ApprovalCreate, ApprovalOut, SupplierData
+from .schemas import (
+    ApprovalCounts,
+    ApprovalCreate,
+    ApprovalOut,
+    IngredientData,
+    SupplierData,
+)
 
 PENDING = ("pending_l1", "pending_owner")
 DECIDED = ("approved", "rejected", "withdrawn")
-L1_ROLES = {Role.manager.value, Role.head_chef.value}
-REQUESTER_ROLES = {Role.warehouse.value} | L1_ROLES
+
+
+def _l1(actor: User) -> bool:
+    return can(actor, "approvals.approve_l1")
+
+
+def _final(actor: User) -> bool:
+    return can(actor, "approvals.approve_final")
 
 
 def _now() -> int:
@@ -41,7 +54,7 @@ def _rp(n: int) -> str:
 
 def _is_l1(actor: User, req: ApprovalRequest) -> bool:
     return (
-        actor.role in L1_ROLES
+        _l1(actor)
         and actor.outlet_id == req.outlet_id
         and actor.id != req.requested_by  # tidak boleh menyetujui pengajuan sendiri
     )
@@ -50,8 +63,8 @@ def _is_l1(actor: User, req: ApprovalRequest) -> bool:
 def can_view(actor: User, req: ApprovalRequest) -> bool:
     return (
         actor.id == req.requested_by
-        or actor.role == Role.owner.value
-        or (actor.role in L1_ROLES and actor.outlet_id == req.outlet_id)
+        or _final(actor)
+        or (_l1(actor) and actor.outlet_id == req.outlet_id)
     )
 
 
@@ -59,15 +72,15 @@ def can_approve(actor: User, req: ApprovalRequest) -> bool:
     if req.status == "pending_l1":
         return _is_l1(actor, req)  # rantai ketat: owner tidak melompati tingkat 1
     if req.status == "pending_owner":
-        return actor.role == Role.owner.value
+        return _final(actor)
     return False
 
 
 def can_reject(actor: User, req: ApprovalRequest) -> bool:
     if req.status == "pending_l1":
-        return _is_l1(actor, req) or actor.role == Role.owner.value
+        return _is_l1(actor, req) or _final(actor)
     if req.status == "pending_owner":
-        return actor.role == Role.owner.value
+        return _final(actor)
     return False
 
 
@@ -172,6 +185,54 @@ def _prepare_supplier(db: Session, s: SupplierData) -> tuple[str, dict, str]:
     )
 
 
+def _prepare_ingredient(db: Session, s: IngredientData) -> tuple[str, dict, str]:
+    name, unit = s.name.strip(), s.unit.strip()
+    if not name or not unit:
+        raise BadRequest("Nama dan satuan bahan wajib diisi")
+    items = list(
+        db.scalars(
+            select(Doc).where(Doc.collection == "ingredients", Doc.deleted.is_(False))
+        )
+    )
+    same = {
+        d.id
+        for d in items
+        if str(d.data.get("name") or "").strip().lower() == name.lower()
+    }
+    before = None
+    if s.action == "create":
+        if same:
+            raise Conflict("Bahan dengan nama itu sudah ada")
+        iid = new_id()
+    else:
+        current = next((d for d in items if d.id == (s.ingredient_id or "")), None)
+        if current is None:
+            raise NotFound("Bahan tidak ditemukan")
+        if same - {current.id}:
+            raise Conflict("Bahan lain dengan nama itu sudah ada")
+        if unit != str(current.data.get("unit") or ""):
+            raise BadRequest(
+                "Satuan dasar tidak bisa diubah karena dipakai stok dan resep. Buat bahan baru bila perlu."
+            )
+        iid = current.id
+        before = {
+            k: current.data.get(k)
+            for k in ("name", "unit", "minStock", "buyUnit", "buyFactor")
+        }
+    buy_unit = s.buy_unit.strip()
+    payload = {
+        "action": s.action,
+        "ingredientId": iid,
+        "name": name,
+        "unit": unit,
+        "minStock": s.min_stock,
+        "buyUnit": buy_unit,
+        "buyFactor": s.buy_factor if buy_unit else 1.0,
+        "before": before,
+    }
+    return iid, payload, f"Bahan {'baru' if s.action == 'create' else 'ubah'}: {name}"
+
+
 # ---------- efek pada dokumen PO / supplier (dilakukan server) ----------
 
 
@@ -220,7 +281,7 @@ def _apply_approved(db: Session, req: ApprovalRequest, now: int) -> None:
             approval_id=req.id,
             extra={"approvedAt": now},
         )
-    else:
+    elif req.type == "supplier":
         p = req.payload
         data = {
             "id": p["supplierId"],
@@ -231,6 +292,19 @@ def _apply_approved(db: Session, req: ApprovalRequest, now: int) -> None:
         }
         sync_service.lock_counter(db)
         sync_service.upsert_doc(db, "suppliers", p["supplierId"], None, data, now)
+    elif req.type == "ingredient":
+        p = req.payload
+        data = {
+            "id": p["ingredientId"],
+            "name": p["name"],
+            "unit": p["unit"],
+            "minStock": p.get("minStock", 0),
+            "buyUnit": p.get("buyUnit", ""),
+            "buyFactor": p.get("buyFactor", 1.0),
+            "updatedAt": now,
+        }
+        sync_service.lock_counter(db)
+        sync_service.upsert_doc(db, "ingredients", p["ingredientId"], None, data, now)
 
 
 def _apply_rejected(db: Session, req: ApprovalRequest, note: str, now: int) -> None:
@@ -253,6 +327,8 @@ def _label(req: ApprovalRequest) -> str:
     p = req.payload
     if req.type == "purchase_order":
         return f"PO {p.get('number', '')} • {p.get('supplierName', '')}".strip(" •")
+    if req.type == "ingredient":
+        return f"Bahan {'baru' if p.get('action') == 'create' else 'ubah'}: {p.get('name', '')}"
     return f"Supplier {'baru' if p.get('action') == 'create' else 'ubah'}: {p.get('name', '')}"
 
 
@@ -273,16 +349,20 @@ def _emit(db: Session, name: str, req: ApprovalRequest, **extra) -> None:
 def create(db: Session, actor: User, data: ApprovalCreate) -> ApprovalRequest:
     if actor.role == Role.owner.value:
         raise Forbidden("Owner tidak perlu mengajukan persetujuan")
-    if actor.role not in REQUESTER_ROLES or actor.outlet_id is None:
+    if not can(actor, "approvals.create") or actor.outlet_id is None:
         raise Forbidden("Role Anda tidak dapat mengajukan persetujuan")
 
     if data.type == "purchase_order":
         ref_id = (data.ref_id or "").strip()
         payload, title = _prepare_po(db, actor, ref_id)
-    else:
+    elif data.type == "supplier":
         if data.supplier is None:
             raise BadRequest("Data supplier wajib diisi")
         ref_id, payload, title = _prepare_supplier(db, data.supplier)
+    else:
+        if data.ingredient is None:
+            raise BadRequest("Data bahan wajib diisi")
+        ref_id, payload, title = _prepare_ingredient(db, data.ingredient)
 
     dup = db.scalar(
         select(ApprovalRequest.id)
@@ -297,7 +377,8 @@ def create(db: Session, actor: User, data: ApprovalCreate) -> ApprovalRequest:
         raise Conflict("Sudah ada pengajuan yang menunggu untuk data ini")
 
     now = _now()
-    stage = "pending_l1" if actor.role == Role.warehouse.value else "pending_owner"
+    # pemohon yang sendiri berwenang tingkat 1 langsung ke tahap akhir
+    stage = "pending_owner" if _l1(actor) else "pending_l1"
     req = ApprovalRequest(
         id=new_id(),
         type=data.type,
@@ -353,7 +434,7 @@ def reject(db: Session, actor: User, approval_id: str, note: str) -> ApprovalReq
     if not can_reject(actor, req):
         raise Forbidden("Anda tidak berwenang menolak pengajuan ini pada tahap ini")
     now = _now()
-    if actor.role == Role.owner.value:
+    if _final(actor):
         req.owner_by, req.owner_at, req.owner_note = actor.id, now, note
     else:
         req.l1_by, req.l1_at, req.l1_note = actor.id, now, note
@@ -389,9 +470,9 @@ def withdraw(db: Session, actor: User, approval_id: str) -> ApprovalRequest:
 
 
 def _inbox_stmt(actor: User):
-    if actor.role == Role.owner.value:
+    if _final(actor):
         return select(ApprovalRequest).where(ApprovalRequest.status == "pending_owner")
-    if actor.role in L1_ROLES:
+    if _l1(actor):
         return select(ApprovalRequest).where(
             ApprovalRequest.status == "pending_l1",
             ApprovalRequest.outlet_id == actor.outlet_id,
@@ -409,11 +490,23 @@ def list_for(
         stmt = _inbox_stmt(actor)
         if stmt is None:
             return []
+    elif (
+        scope == "pending"
+    ):  # semua yang masih menunggu (owner: semua outlet; penyetuju: outlet sendiri)
+        stmt = select(ApprovalRequest).where(ApprovalRequest.status.in_(PENDING))
+        if _final(actor):
+            pass
+        elif _l1(actor):
+            stmt = stmt.where(ApprovalRequest.outlet_id == actor.outlet_id)
+        else:
+            return []
     else:  # history
         stmt = select(ApprovalRequest).where(ApprovalRequest.status.in_(DECIDED))
-        if actor.role in L1_ROLES:
+        if _final(actor):
+            pass
+        elif _l1(actor):
             stmt = stmt.where(ApprovalRequest.outlet_id == actor.outlet_id)
-        elif actor.role != Role.owner.value:
+        else:
             return []
     stmt = stmt.order_by(ApprovalRequest.created_at.desc()).limit(limit).offset(offset)
     return list(db.scalars(stmt).all())

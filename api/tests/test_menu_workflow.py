@@ -75,13 +75,10 @@ def test_head_chef_collections(client, db):
     assert {"recipes", "menu_proposals", "ingredients", "stock_moves", "orders"} <= set(
         r["read"]
     )
-    assert {
-        "recipes",
-        "menu_proposals",
-        "ingredients",
-        "menu_availability",
-        "item_status",
-    } <= set(r["write"])
+    assert {"recipes", "menu_proposals", "menu_availability", "item_status"} <= set(
+        r["write"]
+    )
+    assert "ingredients" not in r["write"]
     assert not (
         {"menu_items", "orders", "stock_moves", "recipe_history"} & set(r["write"])
     )
@@ -119,6 +116,13 @@ def test_recipe_and_ingredient_write_rules(client, db):
     assert push(client, wh, [recipe("m3", [])])[0]["reason"] == "forbidden"
     assert (
         push(client, chef, [d("ingredients", "i1", {"id": "i1", "name": "Beras"})])[0][
+            "reason"
+        ]
+        == "forbidden"
+    )
+    boss = auth_header(client, "boss")
+    assert (
+        push(client, boss, [d("ingredients", "i1", {"id": "i1", "name": "Beras"})])[0][
             "status"
         ]
         == "ok"

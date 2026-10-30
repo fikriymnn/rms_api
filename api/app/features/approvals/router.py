@@ -22,7 +22,7 @@ def create(data: ApprovalCreate, actor: CurrentUser, db: Session = Depends(get_d
 def list_approvals(
     actor: CurrentUser,
     db: Session = Depends(get_db),
-    scope: Literal["inbox", "mine", "history"] = "inbox",
+    scope: Literal["inbox", "mine", "history", "pending"] = "inbox",
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):

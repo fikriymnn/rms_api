@@ -5,9 +5,8 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.features.auth.deps import CurrentUser, require_roles
+from app.features.auth.deps import CurrentUser, require_perm
 from app.features.users.models import User
-from app.features.users.roles import Role
 
 from . import photos, service
 from .schemas import (
@@ -22,7 +21,9 @@ from .schemas import (
 )
 
 router = APIRouter(prefix="/attendance", tags=["attendance"])
-mgmt = Depends(require_roles(Role.owner, Role.manager))
+read_all = Depends(require_perm("attendance.read_all"))
+correct = Depends(require_perm("attendance.correct"))
+review = Depends(require_perm("attendance.review"))
 
 
 def _name(db: Session, user_id: str) -> str:
@@ -30,7 +31,11 @@ def _name(db: Session, user_id: str) -> str:
     return u.name if u else "-"
 
 
-@router.post("/clock", response_model=AttendanceOut)
+@router.post(
+    "/clock",
+    response_model=AttendanceOut,
+    dependencies=[Depends(require_perm("attendance.clock"))],
+)
 def clock(
     actor: CurrentUser,
     db: Session = Depends(get_db),
@@ -66,7 +71,7 @@ def my_attendance(actor: CurrentUser, db: Session = Depends(get_db)):
     return service.me(db, actor)
 
 
-@router.get("/summary", response_model=list[SummaryRow], dependencies=[mgmt])
+@router.get("/summary", response_model=list[SummaryRow], dependencies=[read_all])
 def summary(
     actor: CurrentUser,
     db: Session = Depends(get_db),
@@ -77,7 +82,7 @@ def summary(
     return service.summary(db, actor, outlet_id=outlet_id, since=since, until=until)
 
 
-@router.get("", response_model=list[AttendanceOut], dependencies=[mgmt])
+@router.get("", response_model=list[AttendanceOut], dependencies=[read_all])
 def list_attendance(
     actor: CurrentUser,
     db: Session = Depends(get_db),
@@ -117,7 +122,7 @@ def get_photo(
     )
 
 
-@router.patch("/{record_id}", response_model=AttendanceOut, dependencies=[mgmt])
+@router.patch("/{record_id}", response_model=AttendanceOut, dependencies=[correct])
 def correct_record(
     record_id: str,
     data: CorrectionIn,
@@ -136,7 +141,9 @@ def correct_record(
     return service.to_out(rec, _name(db, rec.user_id))
 
 
-@router.patch("/{record_id}/review", response_model=AttendanceOut, dependencies=[mgmt])
+@router.patch(
+    "/{record_id}/review", response_model=AttendanceOut, dependencies=[review]
+)
 def review_record(
     record_id: str, data: ReviewIn, actor: CurrentUser, db: Session = Depends(get_db)
 ):

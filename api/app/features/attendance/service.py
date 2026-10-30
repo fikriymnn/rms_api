@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.errors import BadRequest, Conflict, Forbidden, NotFound
 from app.features.outlets import service as outlet_service
+from app.features.roles.service import can
 from app.features.users.models import User
 from app.features.users.roles import Role
 
@@ -216,7 +217,7 @@ def me(db: Session, actor: User) -> MeOut:
 
 
 def _scope_outlet(actor: User, outlet_id: str | None) -> str | None:
-    if actor.role == Role.manager.value:
+    if actor.role != Role.owner.value:  # selain owner: terkunci di outletnya
         if outlet_id not in (None, actor.outlet_id):
             raise Forbidden("Anda hanya boleh melihat absensi outlet Anda sendiri")
         return actor.outlet_id
@@ -288,7 +289,7 @@ def get_record_for(
     if rec is not None:
         if actor.role == Role.owner.value:
             return rec
-        if actor.role == Role.manager.value and rec.outlet_id == actor.outlet_id:
+        if can(actor, "attendance.read_all") and rec.outlet_id == actor.outlet_id:
             return rec
         if allow_self and rec.user_id == actor.id:
             return rec

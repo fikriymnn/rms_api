@@ -19,6 +19,8 @@ from app.features.attendance.router import router as attendance_router
 from app.features.approvals.router import router as approvals_router
 from app.features.notifications import handlers as _notification_handlers  # noqa: F401
 from app.features.notifications.router import router as notifications_router
+from app.features.roles.router import router as roles_router
+from app.features.roles.service import seed_system_roles
 
 log = logging.getLogger("rms")
 
@@ -40,8 +42,17 @@ async def _retention_loop() -> None:
         await asyncio.sleep(6 * 3600)
 
 
+def _seed_roles() -> None:
+    with SessionLocal() as db:
+        seed_system_roles(db)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    try:  # peran bawaan masuk ke master role (idempoten)
+        await asyncio.to_thread(_seed_roles)
+    except Exception:
+        log.exception("Seed role bawaan gagal (sudah migrasi?)")
     task = asyncio.create_task(_retention_loop())
     yield
     task.cancel()
@@ -63,6 +74,7 @@ app.include_router(sync_router)
 app.include_router(attendance_router)
 app.include_router(approvals_router)
 app.include_router(notifications_router)
+app.include_router(roles_router)
 
 app.add_middleware(
     CORSMiddleware,

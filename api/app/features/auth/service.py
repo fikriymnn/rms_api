@@ -14,7 +14,7 @@ from app.core.security import (
 from app.core.utils import utcnow
 from app.features.users import service as users_service
 from app.features.users.models import User
-from app.features.users.schemas import UserOut
+from app.features.users.schemas import SessionUserOut
 
 from .models import RefreshToken
 from .schemas import AccessOut, LoginResponse
@@ -48,7 +48,7 @@ def issue_tokens(db: Session, user: User) -> LoginResponse:
         access_token=access,
         refresh_token=raw,
         expires_in=ttl,
-        user=UserOut.model_validate(user),
+        user=SessionUserOut.model_validate(user),
         outlet=(
             OutletOut.model_validate(outlet_service.get_outlet(db, user.outlet_id))
             if user.outlet_id and outlet_service.get_outlet(db, user.outlet_id)

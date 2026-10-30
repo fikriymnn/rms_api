@@ -363,3 +363,33 @@ def test_mark_read_by_target(client, db, sent):
         "/notifications/read", json={"ref_type": "approval"}, headers=chef
     )  # jenis lain: tidak terpengaruh
     assert count(chef) == 2
+
+
+def test_directly_paid_orders_still_notify_the_kitchen(client, db, sent):
+    base_setup(db)
+    register_all(client)
+    wa = auth_header(client, "wa")
+    item = {
+        "id": "i1",
+        "menuItemId": "m1",
+        "name": "Nasi Goreng",
+        "price": 20000,
+        "qty": 2,
+        "note": "",
+    }
+    order = {
+        "id": "od",
+        "number": "INV-D",
+        "status": "paid",
+        "paidAt": 5000,
+        "type": "dineIn",
+        "items": [item],
+    }
+    assert push(client, wa, [d("orders", "od", order)])[0]["status"] == "ok"
+    assert tokens(sent) == {tok("ka"), tok("chef")}
+    assert inbox(client, "ka")[0]["body"] == "2× Nasi Goreng"
+    sent.clear()
+    push(
+        client, wa, [d("orders", "od", {**order, "discount": 0}, ts=2000)]
+    )  # tidak ada item baru
+    assert sent == []

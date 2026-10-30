@@ -43,6 +43,19 @@ def get_current_user(
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
+def require_perm(*perms: str):
+    """Lolos jika user memegang SALAH SATU izin (owner memegang hampir semuanya)."""
+
+    def checker(user: CurrentUser) -> User:
+        from app.features.roles.service import has_any
+
+        if not has_any(user, perms):
+            raise HTTPException(status_code=403, detail="Tidak punya akses")
+        return user
+
+    return checker
+
+
 def require_roles(*roles: Role):
     allowed = {r.value for r in roles}
 

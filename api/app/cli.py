@@ -23,7 +23,7 @@ def create_user(args: argparse.Namespace) -> None:
                 username=args.username,
                 password=password,
                 name=args.name,
-                role=Role(args.role),
+                role=args.role,
                 outlet_id=args.outlet_id,
             )
         except AppError as e:
@@ -87,7 +87,7 @@ def main() -> None:
     c = sub.add_parser("create-user", help="Buat akun (owner pertama, atau akun uji)")
     c.add_argument("--username", required=True)
     c.add_argument("--name", required=True)
-    c.add_argument("--role", choices=[r.value for r in Role], default="owner")
+    c.add_argument("--role", default="owner")
     c.add_argument("--outlet-id", default=None)
     c.set_defaults(func=create_user)
     p = sub.add_parser(
@@ -100,7 +100,8 @@ def main() -> None:
     )
     t.add_argument("--username", required=True)
     t.add_argument(
-        "--channel", default="approvals", choices=["approvals", "kitchen_orders"]
+        "--channel",
+        default="approvals",
     )
     t.set_defaults(func=push_test)
     rc = sub.add_parser(

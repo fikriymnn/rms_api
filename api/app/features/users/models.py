@@ -31,3 +31,15 @@ class User(Base):
     attendance_consent_version: Mapped[int | None] = mapped_column(
         Integer, nullable=True
     )
+
+    @property
+    def permissions(self) -> list[str]:
+        from app.features.roles.service import permissions_of
+
+        return sorted(permissions_of(self))
+
+    @property
+    def role_name(self) -> str:
+        from app.features.roles.service import role_label
+
+        return role_label(self)

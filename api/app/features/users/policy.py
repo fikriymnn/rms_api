@@ -1,33 +1,36 @@
-from .models import User
-from .roles import STAFF_ROLES, Role
+from sqlalchemy.orm import object_session
 
-STAFF_VALUES = {r.value for r in STAFF_ROLES}
+from app.features.roles import service as roles
+from app.features.roles.catalog import OWNER_KEY
+
+from .models import User
 
 
 def can_view(actor: User, target: User) -> bool:
-    if actor.id == target.id or actor.role == Role.owner.value:
+    if actor.id == target.id or actor.role == OWNER_KEY:
         return True
-    if actor.role == Role.manager.value:
+    if roles.can(actor, "users.read"):
         return target.outlet_id is not None and target.outlet_id == actor.outlet_id
     return False
 
 
 def can_manage(actor: User, target: User) -> bool:
+    """Cakupan saja. Izin aksinya (users.update dst.) dijaga di router."""
     if actor.id == target.id:  # akun sendiri diubah lewat /auth
         return False
-    if target.role == Role.owner.value:  # owner tidak bisa dikelola lewat API
+    if target.role == OWNER_KEY:  # owner tidak bisa dikelola lewat API
         return False
-    if actor.role == Role.owner.value:
+    if actor.role == OWNER_KEY:
         return True
-    if actor.role == Role.manager.value:
-        return target.outlet_id == actor.outlet_id and target.role in STAFF_VALUES
-    return False
+    db = object_session(actor)
+    return target.outlet_id == actor.outlet_id and target.role in roles.staff_keys(db)
 
 
 def creatable_roles(actor: User) -> set[str]:
     """Role yang boleh dibuat/diberikan oleh actor."""
-    if actor.role == Role.owner.value:
-        return {Role.manager.value, Role.head_chef.value} | STAFF_VALUES
-    if actor.role == Role.manager.value:
-        return set(STAFF_VALUES)
+    db = object_session(actor)
+    if actor.role == OWNER_KEY:
+        return roles.all_keys(db) - {OWNER_KEY}
+    if roles.can(actor, "users.create") or roles.can(actor, "users.update"):
+        return roles.staff_keys(db)
     return set()

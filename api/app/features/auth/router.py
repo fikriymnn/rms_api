@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import hash_password, verify_password
-from app.features.users.schemas import UserOut
+from app.features.users.schemas import SessionUserOut
 from .tokens import revoke_all, revoke_token  # noqa: F401
 
 from . import service, throttle
@@ -48,7 +48,7 @@ def logout(data: RefreshRequest, db: Session = Depends(get_db)):
     service.revoke_token(db, data.refresh_token)
 
 
-@router.get("/me", response_model=UserOut)
+@router.get("/me", response_model=SessionUserOut)
 def me(user: CurrentUser):
     return user
 

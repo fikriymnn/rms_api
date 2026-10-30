@@ -1,13 +1,15 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.errors import BadRequest, Conflict, Forbidden, NotFound
+from app.core.errors import BadRequest, Conflict, Forbidden, NotFound, Unprocessable
 from app.core.security import hash_password
 from app.features.auth.tokens import revoke_all
 from app.features.outlets import service as outlet_service
 
 from . import policy
 from .models import User
+from app.features.roles import service as roles_service
+from app.features.roles.catalog import OWNER_KEY
 from .roles import Role
 from .schemas import UserCreate, UserUpdate
 
@@ -22,7 +24,7 @@ def create_user(
     username: str,
     password: str,
     name: str,
-    role: Role,
+    role: Role | str,
     outlet_id: str | None = None,
     position: str = "",
     must_change_password: bool = False,
@@ -31,7 +33,10 @@ def create_user(
     username = username.strip().lower()
     if get_by_username(db, username):
         raise Conflict("Username sudah dipakai")
-    if role == Role.owner:
+    role_key = role.value if isinstance(role, Role) else role
+    if not roles_service.role_exists(db, role_key):
+        raise BadRequest("Role tidak dikenal")
+    if role_key == OWNER_KEY:
         outlet_id = None  # owner tidak terikat outlet
     else:
         outlet = outlet_service.get_outlet(db, outlet_id) if outlet_id else None
@@ -42,7 +47,7 @@ def create_user(
         password_hash=hash_password(password),
         name=name,
         position=position,
-        role=role.value,
+        role=role_key,
         outlet_id=outlet_id,
         must_change_password=must_change_password,
     )
@@ -75,7 +80,7 @@ def list_users_for(
     offset: int = 0,
 ) -> list[User]:
     stmt = select(User)
-    if actor.role == Role.manager.value:
+    if actor.role != OWNER_KEY:  # selain owner: terkunci di outletnya
         if outlet_id is not None and outlet_id != actor.outlet_id:
             raise Forbidden("Anda hanya boleh melihat user di outlet Anda")
         stmt = stmt.where(User.outlet_id == actor.outlet_id)
@@ -90,11 +95,13 @@ def list_users_for(
 
 
 def create_user_by(db: Session, actor: User, data: UserCreate) -> User:
-    if data.role.value not in policy.creatable_roles(actor):
+    if not roles_service.role_exists(db, data.role):
+        raise Unprocessable("Role tidak dikenal")
+    if data.role not in policy.creatable_roles(actor):
         raise Forbidden("Anda tidak boleh membuat user dengan role ini")
-    if actor.role == Role.manager.value:
+    if actor.role != OWNER_KEY:
         if data.outlet_id not in (None, actor.outlet_id):
-            raise Forbidden("Manager hanya boleh menambah user di outletnya sendiri")
+            raise Forbidden("Anda hanya boleh menambah user di outletnya sendiri")
         outlet_id = actor.outlet_id
     else:
         outlet_id = data.outlet_id
@@ -117,13 +124,15 @@ def update_user_by(db: Session, actor: User, target: User, data: UserUpdate) -> 
 
     new_role = changes.get("role")
     if new_role is not None:
-        if new_role.value not in policy.creatable_roles(actor):
+        if not roles_service.role_exists(db, new_role):
+            raise Unprocessable("Role tidak dikenal")
+        if new_role not in policy.creatable_roles(actor):
             raise Forbidden("Anda tidak boleh memberikan role ini")
-        target.role = new_role.value
+        target.role = new_role
 
     new_outlet = changes.get("outlet_id")
     if new_outlet is not None:
-        if actor.role != Role.owner.value:
+        if actor.role != OWNER_KEY:
             raise Forbidden("Hanya owner yang boleh memindahkan user ke outlet lain")
         outlet = outlet_service.get_outlet(db, new_outlet)
         if outlet is None or not outlet.active:
