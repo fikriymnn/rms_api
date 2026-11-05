@@ -3,6 +3,10 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    app_env: str = "development"  # server produksi mengisi APP_ENV=production
+    enable_docs: bool = (
+        False  # hanya berlaku di produksi: ENABLE_DOCS=true menyalakan /docs
+    )
     database_url: str
     jwt_secret: str = Field(min_length=32)
     access_token_minutes: int = 30

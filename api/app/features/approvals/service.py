@@ -14,10 +14,13 @@ from app.features.users.models import User
 from app.features.users.roles import Role
 
 from .models import ApprovalRequest
+
+# 1) import schema
 from .schemas import (
     ApprovalCounts,
     ApprovalCreate,
     ApprovalOut,
+    ChargeData,
     IngredientData,
     SupplierData,
 )
@@ -52,6 +55,15 @@ def _rp(n: int) -> str:
 # ---------- siapa boleh apa ----------
 
 
+def _can_override(actor: User, req: ApprovalRequest) -> bool:
+    """Melewati tingkat 1: butuh izin override_l1 DAN wewenang akhir."""
+    return (
+        can(actor, "approvals.override_l1")
+        and _final(actor)
+        and actor.id != req.requested_by
+    )
+
+
 def _is_l1(actor: User, req: ApprovalRequest) -> bool:
     return (
         _l1(actor)
@@ -70,7 +82,9 @@ def can_view(actor: User, req: ApprovalRequest) -> bool:
 
 def can_approve(actor: User, req: ApprovalRequest) -> bool:
     if req.status == "pending_l1":
-        return _is_l1(actor, req)  # rantai ketat: owner tidak melompati tingkat 1
+        return _is_l1(actor, req) or _can_override(
+            actor, req
+        )  # rantai ketat: owner tidak melompati tingkat 1
     if req.status == "pending_owner":
         return _final(actor)
     return False
@@ -233,6 +247,92 @@ def _prepare_ingredient(db: Session, s: IngredientData) -> tuple[str, dict, str]
     return iid, payload, f"Bahan {'baru' if s.action == 'create' else 'ubah'}: {name}"
 
 
+_CHARGE_FIELDS = ("name", "kind", "percent", "onService", "active")
+
+
+def _active_charges(db: Session) -> list[Doc]:
+    return list(
+        db.scalars(
+            select(Doc).where(Doc.collection == "charges", Doc.deleted.is_(False))
+        )
+    )
+
+
+def _same_charge_name(items: list[Doc], name: str, *, except_id: str = "") -> bool:
+    return any(
+        d.id != except_id
+        and str(d.data.get("name") or "").strip().lower() == name.lower()
+        for d in items
+    )
+
+
+def _prepare_charge(db: Session, s: ChargeData) -> tuple[str, dict, str]:
+    items = _active_charges(db)
+    before = None
+    if s.action == "create":
+        name = s.name.strip()
+        if not name:
+            raise BadRequest("Nama biaya wajib diisi")
+        if _same_charge_name(items, name):
+            raise Conflict("Biaya dengan nama itu sudah ada")
+        waiting = db.scalars(
+            select(ApprovalRequest).where(
+                ApprovalRequest.type == "charge", ApprovalRequest.status.in_(PENDING)
+            )
+        )
+        if any(
+            r.payload.get("action") == "create"
+            and str(r.payload.get("name") or "").strip().lower() == name.lower()
+            for r in waiting
+        ):
+            raise Conflict(
+                "Sudah ada pengajuan yang menunggu untuk biaya dengan nama itu"
+            )
+        cid, kind, percent, on_service, active = (
+            new_id(),
+            s.kind,
+            s.percent,
+            s.on_service,
+            s.active,
+        )
+    else:
+        current = next((d for d in items if d.id == (s.charge_id or "")), None)
+        if current is None:
+            raise NotFound("Data biaya tidak ditemukan")
+        cid = current.id
+        before = {k: current.data.get(k) for k in _CHARGE_FIELDS}
+        if s.action == "delete":
+            name = str(current.data.get("name") or "")
+            kind = str(current.data.get("kind") or "tax")
+            percent = _num(current.data.get("percent"))
+            on_service = bool(current.data.get("onService"))
+            active = bool(current.data.get("active", True))
+        else:
+            name = s.name.strip()
+            if not name:
+                raise BadRequest("Nama biaya wajib diisi")
+            if _same_charge_name(items, name, except_id=cid):
+                raise Conflict("Biaya lain dengan nama itu sudah ada")
+            kind, percent, on_service, active = (
+                s.kind,
+                s.percent,
+                s.on_service,
+                s.active,
+            )
+    payload = {
+        "action": s.action,
+        "chargeId": cid,
+        "name": name,
+        "kind": kind,
+        "percent": percent,
+        "onService": on_service,
+        "active": active,
+        "before": before,
+    }
+    verb = {"create": "baru", "update": "ubah", "delete": "hapus"}[s.action]
+    return cid, payload, f"Biaya {verb}: {name} {percent:g}%"
+
+
 # ---------- efek pada dokumen PO / supplier (dilakukan server) ----------
 
 
@@ -305,6 +405,30 @@ def _apply_approved(db: Session, req: ApprovalRequest, now: int) -> None:
         }
         sync_service.lock_counter(db)
         sync_service.upsert_doc(db, "ingredients", p["ingredientId"], None, data, now)
+    elif req.type == "charge":
+        p = req.payload
+        cid = p["chargeId"]
+        current = db.get(Doc, ("charges", cid))
+        if p["action"] == "create":
+            if _same_charge_name(_active_charges(db), p["name"]):
+                raise Conflict(
+                    "Nama biaya sudah dipakai. Minta pemohon mengajukan ulang."
+                )
+        elif current is None or current.deleted:
+            raise Conflict("Data biaya sudah berubah. Minta pemohon mengajukan ulang.")
+        data = {
+            "id": cid,
+            "name": p["name"],
+            "kind": p["kind"],
+            "percent": p["percent"],
+            "onService": p.get("onService", False),
+            "active": p.get("active", True),
+            "updatedAt": now,
+        }
+        sync_service.lock_counter(db)
+        sync_service.upsert_doc(
+            db, "charges", cid, None, data, now, deleted=p["action"] == "delete"
+        )
 
 
 def _apply_rejected(db: Session, req: ApprovalRequest, note: str, now: int) -> None:
@@ -329,6 +453,9 @@ def _label(req: ApprovalRequest) -> str:
         return f"PO {p.get('number', '')} • {p.get('supplierName', '')}".strip(" •")
     if req.type == "ingredient":
         return f"Bahan {'baru' if p.get('action') == 'create' else 'ubah'}: {p.get('name', '')}"
+    if req.type == "charge":
+        verb = {"create": "baru", "delete": "hapus"}.get(p.get("action"), "ubah")
+        return f"Biaya {verb}: {p.get('name', '')}"
     return f"Supplier {'baru' if p.get('action') == 'create' else 'ubah'}: {p.get('name', '')}"
 
 
@@ -359,10 +486,16 @@ def create(db: Session, actor: User, data: ApprovalCreate) -> ApprovalRequest:
         if data.supplier is None:
             raise BadRequest("Data supplier wajib diisi")
         ref_id, payload, title = _prepare_supplier(db, data.supplier)
-    else:
+    elif data.type == "ingredient":
         if data.ingredient is None:
             raise BadRequest("Data bahan wajib diisi")
         ref_id, payload, title = _prepare_ingredient(db, data.ingredient)
+    else:
+        if not can(actor, "charges.request"):
+            raise Forbidden("Role Anda tidak dapat mengajukan perubahan pajak / biaya")
+        if data.charge is None:
+            raise BadRequest("Data biaya wajib diisi")
+        ref_id, payload, title = _prepare_charge(db, data.charge)
 
     dup = db.scalar(
         select(ApprovalRequest.id)
@@ -411,10 +544,17 @@ def approve(db: Session, actor: User, approval_id: str, note: str) -> ApprovalRe
     if not can_approve(actor, req):
         raise Forbidden("Anda tidak berwenang menyetujui pengajuan ini pada tahap ini")
     now = _now()
-    if req.status == "pending_l1":
+    if req.status == "pending_l1" and _is_l1(actor, req):
         req.l1_by, req.l1_at, req.l1_note = actor.id, now, note
         req.status = "pending_owner"
         event = "approval.advanced"
+    elif req.status == "pending_l1":  # override: satu aksi menyelesaikan rantai
+        skip = f"Dilewati oleh {actor.name}"
+        req.l1_by, req.l1_at, req.l1_note = actor.id, now, skip
+        req.owner_by, req.owner_at, req.owner_note = actor.id, now, note
+        req.status = "approved"
+        _apply_approved(db, req, now)
+        event = "approval.decided"
     else:
         req.owner_by, req.owner_at, req.owner_note = actor.id, now, note
         req.status = "approved"

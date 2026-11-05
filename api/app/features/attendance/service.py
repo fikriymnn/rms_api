@@ -10,7 +10,7 @@ from app.features.roles.service import can
 from app.features.users.models import User
 from app.features.users.roles import Role
 
-from . import photos
+from . import photos, schedule
 from .geo import distance_m
 from .models import Attendance, ConsentEvent
 from .schemas import AttendanceOut, MeOut, SummaryRow
@@ -55,6 +55,8 @@ def to_out(rec: Attendance, user_name: str, now: int | None = None) -> Attendanc
         review_note=rec.review_note,
         edited=bool(rec.edits),
         stale=rec.clock_out_at is None and now - rec.clock_in_at > STALE_MS,
+        via_kiosk=bool(rec.in_kiosk_id or rec.out_kiosk_id),
+        **schedule.evaluate(rec),
     )
 
 
@@ -90,6 +92,7 @@ def clock(
     mocked: bool,
     liveness_ok: bool,
     photo_raw: bytes,
+    kiosk: User | None = None,
 ) -> Attendance:
     if actor.outlet_id is None:
         raise Forbidden("Akun ini tidak terikat outlet, tidak melakukan absensi")
@@ -166,7 +169,9 @@ def clock(
                 in_flags=",".join(flags),
                 in_received_at=now,
                 in_event_id=event_id,
+                in_kiosk_id=kiosk.id if kiosk else None,
             )
+            schedule.stamp(rec, schedule.expected_for(db, outlet, client_time))
             db.add(rec)
         else:
             rec = open_rec
@@ -179,6 +184,7 @@ def clock(
             rec.out_flags = ",".join(flags)
             rec.out_received_at = now
             rec.out_event_id = event_id
+            rec.out_kiosk_id = kiosk.id if kiosk else None
         db.commit()
     except Exception:
         db.rollback()
@@ -279,6 +285,12 @@ def summary(
         s.records += 1
         s.minutes += r.minutes or 0
         s.open_count += 1 if r.clock_out_at is None else 0
+        if r.in_status == "late":
+            s.late_count += 1
+            s.late_minutes += r.late_min
+        if r.out_status == "early":
+            s.early_out_count += 1
+        s.overtime_minutes += r.overtime_min
     return sorted(agg.values(), key=lambda s: s.user_name.lower())
 
 
@@ -353,6 +365,10 @@ def correct(
     rec.edits = edits  # ditetapkan ulang agar perubahan JSON terdeteksi
     rec.clock_in_at = new_in
     rec.clock_out_at = new_out
+    if rec.sched_in_at is None:  # catatan lama / saat itu belum ada jadwal
+        outlet = outlet_service.get_outlet(db, rec.outlet_id)
+        if outlet is not None:
+            schedule.stamp(rec, schedule.expected_for(db, outlet, new_in))
     db.commit()
     db.refresh(rec)
     return rec
@@ -387,7 +403,9 @@ def purge_old_photos(db: Session, days: int) -> int:
     return len(rows)
 
 
-def give_consent(db: Session, actor: User, version: int) -> ConsentOut:
+def give_consent(
+    db: Session, actor: User, version: int, *, by: str | None = None
+) -> ConsentOut:
     if version != settings.attendance_consent_version:
         raise BadRequest("Versi persetujuan tidak sesuai. Perbarui aplikasi Anda.")
     actor.attendance_consent_version = version
@@ -398,6 +416,7 @@ def give_consent(db: Session, actor: User, version: int) -> ConsentOut:
             kind="granted",
             version=version,
             at=actor.attendance_consent_at,
+            by_user=by,
         )
     )
     db.commit()

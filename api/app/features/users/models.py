@@ -31,6 +31,17 @@ class User(Base):
     attendance_consent_version: Mapped[int | None] = mapped_column(
         Integer, nullable=True
     )
+    attendance_pin_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    attendance_pin_failed: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    attendance_pin_locked_until: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True
+    )
+
+    @property
+    def attendance_pin_set(self) -> bool:
+        return bool(self.attendance_pin_hash)
 
     @property
     def permissions(self) -> list[str]:

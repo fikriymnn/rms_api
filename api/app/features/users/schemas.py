@@ -39,6 +39,7 @@ class UserOut(BaseModel):
     outlet_id: str | None
     active: bool
     must_change_password: bool = False
+    attendance_pin_set: bool = False
 
 
 class SessionUserOut(UserOut):

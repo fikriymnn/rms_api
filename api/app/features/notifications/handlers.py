@@ -179,6 +179,27 @@ def _order_items_added(db: Session, p: dict) -> list[Notice]:
     ]
 
 
+def _order_items_ready(db: Session, p: dict) -> list[Notice]:
+    items = p["items"]  # [[nama, jumlah], ...]
+    shown = ", ".join(f"{_q(q)}× {n}" for n, q in items[:3])
+    if len(items) > 3:
+        shown += f" dan {len(items) - 3} lainnya"
+    users = _users(db, _holders(db, "orders.notify_ready"), outlet_id=p["outlet_id"])
+    # pelayan yang membuat pesanan diutamakan; kalau bukan pemegang izin, semua pelayan outlet
+    mine = [u for u in users if u.id == p.get("created_by")]
+    return [
+        Notice(
+            mine or users,
+            "order_ready",
+            p["order_id"],
+            f"Siap diantar • {p['where']}",
+            shown[:250],
+            "order_ready",
+            p["outlet_id"],
+        )
+    ]
+
+
 _BUILDERS = {
     "approval.submitted": _approval_submitted,
     "approval.advanced": _approval_advanced,
@@ -186,6 +207,7 @@ _BUILDERS = {
     "proposal.submitted": _proposal_submitted,
     "proposal.decided": _proposal_decided,
     "order.items_added": _order_items_added,
+    "order.items_ready": _order_items_ready,
 }
 
 

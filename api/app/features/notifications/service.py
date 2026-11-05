@@ -1,6 +1,8 @@
 import time
 
+# 1) import
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.utils import new_id
@@ -16,21 +18,29 @@ def _now() -> int:
 def register_device(db: Session, user: User, token: str, platform: str) -> None:
     """Satu token hanya milik satu akun: bila perangkat dipakai akun lain, kepemilikan berpindah."""
     now = _now()
-    row = db.scalar(select(DeviceToken).where(DeviceToken.token == token))
-    if row is None:
+    user_id = user.id
+    for _ in range(2):
+        row = db.scalar(select(DeviceToken).where(DeviceToken.token == token))
+        if row is not None:
+            row.user_id, row.platform, row.last_seen_at = user_id, platform, now
+            db.commit()
+            return
         db.add(
             DeviceToken(
                 id=new_id(),
-                user_id=user.id,
+                user_id=user_id,
                 token=token,
                 platform=platform,
                 created_at=now,
                 last_seen_at=now,
             )
         )
-    else:
-        row.user_id, row.platform, row.last_seen_at = user.id, platform, now
-    db.commit()
+        try:
+            db.commit()
+            return
+        except IntegrityError:
+            # permintaan lain mendaftarkan token yang sama lebih dulu: ulangi sebagai pembaruan
+            db.rollback()
 
 
 def unregister_device(db: Session, user: User, token: str) -> None:

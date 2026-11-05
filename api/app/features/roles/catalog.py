@@ -42,6 +42,7 @@ CATALOG: tuple[Feature, ...] = (
             ("discount", "Beri diskon"),
             ("refund", "Refund"),
             ("void_processed", "Batalkan item yang sudah diproses dapur"),
+            ("notify_ready", "Terima notifikasi item siap diantar"),
         ),
     ),
     Feature(
@@ -118,6 +119,12 @@ CATALOG: tuple[Feature, ...] = (
         ),
     ),
     Feature(
+        "charges",
+        "Pajak & biaya layanan",
+        "Manajemen",
+        _CRUD + (("request", "Ajukan perubahan (perlu persetujuan owner)"),),
+    ),
+    Feature(
         "approvals",
         "Persetujuan",
         "Manajemen",
@@ -126,6 +133,7 @@ CATALOG: tuple[Feature, ...] = (
             ("create", "Mengajukan"),
             ("approve_l1", "Menyetujui tingkat 1"),
             ("approve_final", "Menyetujui akhir"),
+            ("override_l1", "Melewati tingkat 1 (satu aksi menyelesaikan rantai)"),
         ),
     ),
     Feature(
@@ -137,6 +145,9 @@ CATALOG: tuple[Feature, ...] = (
             ("read_all", "Lihat absensi tim"),
             ("correct", "Koreksi"),
             ("review", "Tinjau foto"),
+            ("kiosk", "Menjalankan absensi bersama (kiosk)"),
+            ("pin_manage", "Atur PIN absensi karyawan"),
+            ("schedule", "Atur jadwal buka-tutup outlet"),
         ),
     ),
     Feature(
@@ -167,6 +178,8 @@ OPT_IN = frozenset(
         "attendance.clock",
         "approvals.create",
         "approvals.approve_l1",
+        "orders.notify_ready",
+        "attendance.kiosk",
     }
 )
 OWNER_PERMISSIONS: frozenset[str] = ALL_PERMISSIONS - OPT_IN
@@ -189,6 +202,7 @@ _GRANTS: dict[tuple[str, ...], tuple[str, ...]] = {
         "orders.create",
         "orders.update",
         "orders.delete",
+        "charges.read",
         "tables.hold",
         "audit.create",
         "reservations.read",
@@ -205,6 +219,7 @@ _GRANTS: dict[tuple[str, ...], tuple[str, ...]] = {
         "orders.void_processed",
         "shifts.manage_all",
         "expenses.manage_all",
+        "expenses.delete",
         "finance.read",
         "reports.read",
         "audit.read",
@@ -213,6 +228,7 @@ _GRANTS: dict[tuple[str, ...], tuple[str, ...]] = {
         "attendance.read_all",
         "attendance.correct",
         "attendance.review",
+        "attendance.pin_manage",
         "users.read",
         "users.create",
         "users.update",
@@ -227,7 +243,6 @@ _GRANTS: dict[tuple[str, ...], tuple[str, ...]] = {
         "expenses.read",
         "expenses.create",
         "expenses.update",
-        "expenses.delete",
         "menu.availability",
     ),
     _CHEF: ("menu.availability",),
@@ -247,6 +262,9 @@ _GRANTS: dict[tuple[str, ...], tuple[str, ...]] = {
         "suppliers.create",
         "suppliers.update",
         "suppliers.delete",
+        "charges.create",
+        "charges.update",
+        "charges.delete",
         "stock.purchase_direct",
         "purchase_orders.direct_order",
         "proposals.decide",
@@ -275,11 +293,13 @@ _GRANTS: dict[tuple[str, ...], tuple[str, ...]] = {
     ),
     ("owner", "manager", "head_chef", "warehouse"): ("approvals.read",),
     ("warehouse", "manager", "head_chef"): ("approvals.create",),
+    ("manager",): ("charges.request",),
     ("manager", "head_chef"): ("approvals.approve_l1",),
     ("manager", "head_chef", "cashier", "waiter", "kitchen", "warehouse"): (
         "attendance.clock",
     ),
     ("owner", "manager", "head_chef", "kitchen", "warehouse"): ("notifications.read",),
+    ("waiter",): ("orders.notify_ready", "notifications.read"),
 }
 
 

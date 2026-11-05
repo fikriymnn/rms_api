@@ -320,6 +320,8 @@ def _after_write(
         if status == "paid" and prev not in ("paid", "refunded"):
             _deduct_stock(db, actor, target, it.id, it.data, now_ms)
         _queue_order_event(db, target, it.id, old, it.data)
+    elif it.collection == "item_status":
+        _queue_item_ready(db, target, it.id, old, it.data)
     elif it.collection == "menu_proposals":
         name = str(it.data.get("name") or "")
         if status == "approved" and prev != "approved":
@@ -438,6 +440,66 @@ def _item_key(it: dict) -> str:
     return str(it.get("id") or f"{it.get('menuItemId')}|{it.get('note', '')}")
 
 
+def _order_where(db: Session, order: dict) -> str:
+    if order.get("type") == "takeaway":
+        return "Takeaway"
+    table = (
+        db.get(Doc, ("tables", str(order["tableId"]))) if order.get("tableId") else None
+    )
+    label = (
+        str(table.data.get("name") or table.data.get("number") or "")
+        if table is not None
+        else ""
+    )
+    if not label:
+        return "Dine-in"
+    return label if label.lower().startswith("meja") else f"Meja {label}"
+
+
+def _queue_item_ready(
+    db: Session, outlet: str | None, item_id: str, old: dict | None, new: dict
+) -> None:
+    """Item berubah menjadi 'ready' -> beri tahu pelayan. Satu push = satu notifikasi per pesanan."""
+    if new.get("status") != "ready" or (old or {}).get("status") == "ready":
+        return
+    order_id = str(new.get("orderId") or "")
+    order = db.get(Doc, ("orders", order_id)) if order_id else None
+    if order is None or order.deleted:
+        return
+    od = order.data
+    if od.get("status") in ("voided", "refunded"):
+        return
+    line = next(
+        (
+            i
+            for i in (od.get("items") or [])
+            if isinstance(i, dict) and str(i.get("id")) == item_id
+        ),
+        None,
+    )
+    entry = [
+        str((line or {}).get("name") or "Item"),
+        _num((line or {}).get("qty")) or 1.0,
+    ]
+    queue = db.info.setdefault("events", [])
+    for name, payload in queue:
+        if name == "order.items_ready" and payload["order_id"] == order_id:
+            payload["items"].append(entry)
+            return
+    queue.append(
+        (
+            "order.items_ready",
+            {
+                "outlet_id": outlet,
+                "order_id": order_id,
+                "created_by": od.get("createdBy"),
+                "where": _order_where(db, od),
+                "items": [entry],
+            },
+        )
+    )
+
+
 def _queue_order_event(
     db: Session, outlet: str | None, order_id: str, old: dict | None, new: dict
 ) -> None:
@@ -460,22 +522,7 @@ def _queue_order_event(
             added.append([str(it.get("name") or "Item"), delta])
     if not added:
         return
-    if new.get("type") == "takeaway":
-        where = "Takeaway"
-    else:
-        table = (
-            db.get(Doc, ("tables", str(new["tableId"]))) if new.get("tableId") else None
-        )
-        label = (
-            str(table.data.get("name") or table.data.get("number") or "")
-            if table is not None
-            else ""
-        )
-        where = (
-            (label if label.lower().startswith("meja") else f"Meja {label}")
-            if label
-            else "Dine-in"
-        )
+    where = _order_where(db, new)
     _queue_event(
         db,
         "order.items_added",

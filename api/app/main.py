@@ -21,6 +21,7 @@ from app.features.notifications import handlers as _notification_handlers  # noq
 from app.features.notifications.router import router as notifications_router
 from app.features.roles.router import router as roles_router
 from app.features.roles.service import seed_system_roles
+from app.features.charges.seed import seed_default_charges
 
 log = logging.getLogger("rms")
 
@@ -47,18 +48,36 @@ def _seed_roles() -> None:
         seed_system_roles(db)
 
 
+def _seed_charges() -> None:
+    with SessionLocal() as db:
+        seed_default_charges(db)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:  # peran bawaan masuk ke master role (idempoten)
         await asyncio.to_thread(_seed_roles)
     except Exception:
         log.exception("Seed role bawaan gagal (sudah migrasi?)")
+    try:  # PB1 10% bila master pajak masih kosong (idempoten)
+        await asyncio.to_thread(_seed_charges)
+    except Exception:
+        log.exception("Seed pajak bawaan gagal")
     task = asyncio.create_task(_retention_loop())
     yield
     task.cancel()
 
 
-app = FastAPI(title="RMS API", lifespan=lifespan)
+_prod = settings.app_env == "production"
+_docs_on = (not _prod) or settings.enable_docs
+
+app = FastAPI(
+    title="RMS API",
+    lifespan=lifespan,
+    docs_url="/docs" if _docs_on else None,
+    redoc_url="/redoc" if _docs_on else None,
+    openapi_url="/openapi.json" if _docs_on else None,
+)
 
 
 @app.exception_handler(AppError)

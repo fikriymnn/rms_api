@@ -274,3 +274,9 @@ def test_reset_system_role_restores_defaults(client, db):
     r = client.post("/roles/cashier/reset", headers=boss)
     assert r.status_code == 200
     assert set(r.json()["permissions"]) == set(SYSTEM_DEFAULTS["cashier"])
+
+
+def test_expense_delete_default_is_manager_and_up():
+    assert "expenses.delete" in SYSTEM_DEFAULTS["manager"]
+    assert "expenses.delete" not in SYSTEM_DEFAULTS["cashier"]
+    assert "approvals.override_l1" not in SYSTEM_DEFAULTS["manager"]

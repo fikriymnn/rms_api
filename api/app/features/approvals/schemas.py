@@ -21,11 +21,22 @@ class IngredientData(BaseModel):
     buy_factor: float = Field(default=1, gt=0)
 
 
+class ChargeData(BaseModel):
+    action: Literal["create", "update", "delete"]
+    charge_id: str | None = None
+    name: str = Field(default="", max_length=60)
+    kind: Literal["tax", "service"] = "tax"
+    percent: float = Field(default=0, ge=0, le=100)
+    on_service: bool = False  # pajak dihitung atas subtotal + biaya layanan
+    active: bool = True
+
+
 class ApprovalCreate(BaseModel):
-    type: Literal["purchase_order", "supplier", "ingredient"]
+    type: Literal["purchase_order", "supplier", "ingredient", "charge"]
     ref_id: str | None = Field(default=None, max_length=128)  # purchase_order: id PO
     supplier: SupplierData | None = None
     ingredient: IngredientData | None = None
+    charge: ChargeData | None = None
 
 
 class DecisionIn(BaseModel):

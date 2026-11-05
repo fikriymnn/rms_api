@@ -80,7 +80,6 @@ def test_level_one_approval_rules(client, db):
         act(client, auth_header(client, "ca"), aid, "approve").status_code == 404
     )  # tidak berkaitan
     assert act(client, mgr_b, aid, "approve").status_code == 404  # outlet lain
-    assert act(client, boss, aid, "approve").status_code == 403  # rantai ketat
     r = act(client, mgr_a, aid, "approve", "oke")
     assert r.status_code == 200 and r.json()["status"] == "pending_owner"
     assert r.json()["l1_by_name"] == "Mgr_A" and r.json()["l1_note"] == "oke"
@@ -438,4 +437,31 @@ def test_ingredient_requests_follow_the_same_chain(client, db):
             "/approvals", json=new, headers=auth_header(client, "ca")
         ).status_code
         == 403
+    )
+
+
+def test_owner_can_override_level_one_in_one_action(client, db):
+    prepare(client, db)
+    wh, boss = auth_header(client, "wh"), auth_header(client, "boss")
+    aid = submit(client, wh).json()["id"]
+    assert po_status(client, wh) == "pending"
+    r = act(client, boss, aid, "approve", "darurat")
+    assert r.status_code == 200 and r.json()["status"] == "approved"
+    assert r.json()["l1_note"] == "Dilewati oleh Boss"
+    assert r.json()["owner_note"] == "darurat"
+    assert po_status(client, wh) == "ordered"
+
+
+def test_override_needs_its_own_permission(client, db):
+    from .helpers import make_user
+    from .test_roles import new_role
+
+    a, _ = prepare(client, db)
+    boss, wh = auth_header(client, "boss"), auth_header(client, "wh")
+    new_role(client, boss, "finalonly", ["approvals.read", "approvals.approve_final"])
+    make_user(db, "fo", "finalonly", a.id)
+    aid = submit(client, wh).json()["id"]
+    assert act(client, auth_header(client, "fo"), aid, "approve").status_code in (
+        403,
+        404,
     )

@@ -51,6 +51,17 @@ class Attendance(Base):
     out_event_id: Mapped[str | None] = mapped_column(
         String(36), unique=True, nullable=True
     )
+    in_kiosk_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )  # akun kiosk yang mengirim absen masuk (kosong = HP sendiri)
+    out_kiosk_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
+
+    # jadwal yang berlaku saat absen masuk (snapshot, tidak berubah bila jadwal diubah)
+    sched_in_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    sched_out_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    sched_grace_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     review_status: Mapped[str] = mapped_column(
         String(12), default="pending"

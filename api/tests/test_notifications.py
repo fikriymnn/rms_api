@@ -393,3 +393,141 @@ def test_directly_paid_orders_still_notify_the_kitchen(client, db, sent):
         client, wa, [d("orders", "od", {**order, "discount": 0}, ts=2000)]
     )  # tidak ada item baru
     assert sent == []
+
+
+def test_ready_items_notify_the_waiter(client, db, sent):
+    a, b = base_setup(db)
+    make_user(db, "wa2", Role.waiter, a.id)
+    make_user(db, "wb", Role.waiter, b.id)
+    users = USERS + ("wa2", "wb")
+    register_all(client, users)
+    mgr, wa, ca, ka = (auth_header(client, u) for u in ("mgr_a", "wa", "ca", "ka"))
+    push(client, mgr, [d("tables", "t1", {"id": "t1", "name": "5"})])
+
+    def item(i, name, qty):
+        return {
+            "id": i,
+            "menuItemId": f"m{i}",
+            "name": name,
+            "price": 1000,
+            "qty": qty,
+            "note": "",
+        }
+
+    def order(oid, by, items):
+        return {
+            "id": oid,
+            "number": oid.upper(),
+            "status": "open",
+            "type": "dineIn",
+            "tableId": "t1",
+            "createdBy": me_id(client, by),
+            "items": items,
+        }
+
+    def ready(oid, *ids, ts=2000):
+        return [
+            d("item_status", i, {"id": i, "orderId": oid, "status": "ready"}, ts=ts)
+            for i in ids
+        ]
+
+    push(
+        client,
+        wa,
+        [
+            d(
+                "orders",
+                "o1",
+                order(
+                    "o1", wa, [item("i1", "Nasi Goreng", 2), item("i2", "Es Teh", 1)]
+                ),
+            )
+        ],
+    )
+    sent.clear()
+
+    # dua item siap dalam satu push -> satu notifikasi, hanya ke pelayan pembuat pesanan
+    assert all(r["status"] == "ok" for r in push(client, ka, ready("o1", "i1", "i2")))
+    assert tokens(sent) == {tok("wa")}
+    n = inbox(client, "wa")[0]
+    assert n["title"] == "Siap diantar • Meja 5"
+    assert n["body"] == "2× Nasi Goreng, 1× Es Teh" and n["type"] == "order_ready"
+    assert sent[0]["channel"] == "order_ready"
+    for u in ("wa2", "wb", "ka", "chef", "ca", "mgr_a", "boss"):
+        assert [x for x in inbox(client, u) if x["type"] == "order_ready"] == [], u
+
+    sent.clear()
+    push(client, ka, ready("o1", "i1", "i2", ts=3000))  # sudah 'ready' -> tidak diulang
+    assert sent == []
+
+    # pesanan dibuat kasir (bukan pemegang izin) -> semua pelayan outlet itu
+    push(client, ca, [d("orders", "o2", order("o2", ca, [item("i9", "Kopi", 1)]))])
+    sent.clear()
+    push(client, ka, ready("o2", "i9"))
+    assert tokens(sent) == {tok("wa"), tok("wa2")}
+
+
+def test_each_single_ready_item_notifies_separately(client, db, sent):
+    a, b = base_setup(db)
+    register_all(client, USERS)
+    mgr, wa, ka = (auth_header(client, u) for u in ("mgr_a", "wa", "ka"))
+    push(client, mgr, [d("tables", "t1", {"id": "t1", "name": "5"})])
+    items = [
+        {"id": i, "menuItemId": f"m{i}", "name": n, "price": 1000, "qty": 1, "note": ""}
+        for i, n in (("i1", "Nasi Goreng"), ("i2", "Es Teh"))
+    ]
+    order = {
+        "id": "o1",
+        "number": "O1",
+        "status": "open",
+        "type": "dineIn",
+        "tableId": "t1",
+        "createdBy": me_id(client, wa),
+        "items": items,
+    }
+    push(client, wa, [d("orders", "o1", order)])
+
+    def ready(i, ts):
+        return [
+            d("item_status", i, {"id": i, "orderId": "o1", "status": "ready"}, ts=ts)
+        ]
+
+    sent.clear()
+    push(client, ka, ready("i1", 2000))
+    push(client, ka, ready("i2", 3000))
+    bodies = [n["body"] for n in inbox(client, "wa") if n["type"] == "order_ready"]
+    assert sorted(bodies) == ["1× Es Teh", "1× Nasi Goreng"]
+    assert len([x for x in sent if x["token"] == tok("wa")]) == 2
+
+
+def test_concurrent_device_registration_does_not_fail(client, db, monkeypatch):
+    """Dua pendaftaran token yang bersamaan: yang kalah balapan harus memperbarui, bukan error."""
+    from app.features.notifications import service
+    from app.features.notifications.models import DeviceToken
+    from sqlalchemy import func, select
+
+    a, b = base_setup(db)
+    u1 = make_user(db, "r1", Role.waiter, a.id)
+    u2 = make_user(db, "r2", Role.waiter, a.id)
+    service.register_device(db, u1, "tok-race-1", "android")
+
+    # simulasikan balapan: pencarian pertama tidak melihat baris yang sudah ada
+    calls = []
+    real = db.scalar
+
+    def blind_first(*args, **kwargs):
+        calls.append(1)
+        return None if len(calls) == 1 else real(*args, **kwargs)
+
+    monkeypatch.setattr(db, "scalar", blind_first)
+    service.register_device(db, u2, "tok-race-1", "android")  # tidak boleh melempar
+    monkeypatch.undo()
+
+    db.rollback()
+    rows = db.scalars(
+        select(DeviceToken).where(DeviceToken.token == "tok-race-1")
+    ).all()
+    assert (
+        len(rows) == 1 and rows[0].user_id == u2.id
+    )  # kepemilikan berpindah ke akun terakhir
+    assert db.scalar(select(func.count()).select_from(DeviceToken)) == 1

@@ -72,6 +72,18 @@ def _shifts_check(actor: User, data: dict, old: dict | None) -> str | None:
     return None
 
 
+def _charges_check(actor: User, data: dict, old: dict | None) -> str | None:
+    """Pajak / biaya layanan: jenis dan persentase harus masuk akal."""
+    if not str(data.get("name") or "").strip():
+        return "nama biaya wajib diisi"
+    if data.get("kind") not in ("tax", "service"):
+        return "jenis biaya harus tax atau service"
+    p = data.get("percent")
+    if isinstance(p, bool) or not isinstance(p, (int, float)) or not 0 <= p <= 100:
+        return "persentase harus 0 sampai 100"
+    return None
+
+
 def _expenses_check(actor: User, data: dict, old: dict | None) -> str | None:
     if not can(actor, "expenses.manage_all"):
         if data.get("fromDrawer") is not True or (
@@ -198,6 +210,8 @@ REGISTRY: dict[str, Spec] = {
     "recipe_history": Spec("shared", read=("recipes.read",), append_only=True),
     "ingredients": Spec("shared", **crud("ingredients")),
     "suppliers": Spec("shared", **crud("suppliers")),
+    # pajak & biaya layanan: owner menulis langsung, manager lewat persetujuan
+    "charges": Spec("shared", **crud("charges"), check=_charges_check),
     # --- data per outlet ---
     "menu_availability": Spec(
         "outlet",
