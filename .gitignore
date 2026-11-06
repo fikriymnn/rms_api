@@ -2,5 +2,3 @@
 __pycache__/
 *.pyc
 secrets/
-docker-compose.prod.yml
-Dockerfile.prod
