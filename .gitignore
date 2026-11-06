@@ -1,7 +1,7 @@
 .env
-__pycache__/
-*.pyc
-.pytest_cache/
 secrets/
 backups/
 *.tar.gz
+*.save
+NAMA_FILE_COMPOSE
+__pycache__/
