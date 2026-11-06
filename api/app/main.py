@@ -97,7 +97,7 @@ app.include_router(roles_router)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",  # hanya untuk pengembangan
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",  # hanya untuk pengembangan.
     allow_methods=["*"],
     allow_headers=["*"],
 )
