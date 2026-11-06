@@ -498,3 +498,36 @@ def test_each_single_ready_item_notifies_separately(client, db, sent):
     bodies = [n["body"] for n in inbox(client, "wa") if n["type"] == "order_ready"]
     assert sorted(bodies) == ["1× Es Teh", "1× Nasi Goreng"]
     assert len([x for x in sent if x["token"] == tok("wa")]) == 2
+
+
+def test_concurrent_device_registration_does_not_fail(client, db, monkeypatch):
+    """Dua pendaftaran token yang bersamaan: yang kalah balapan harus memperbarui, bukan error."""
+    from app.features.notifications import service
+    from app.features.notifications.models import DeviceToken
+    from sqlalchemy import func, select
+
+    a, b = base_setup(db)
+    u1 = make_user(db, "r1", Role.waiter, a.id)
+    u2 = make_user(db, "r2", Role.waiter, a.id)
+    service.register_device(db, u1, "tok-race-1", "android")
+
+    # simulasikan balapan: pencarian pertama tidak melihat baris yang sudah ada
+    calls = []
+    real = db.scalar
+
+    def blind_first(*args, **kwargs):
+        calls.append(1)
+        return None if len(calls) == 1 else real(*args, **kwargs)
+
+    monkeypatch.setattr(db, "scalar", blind_first)
+    service.register_device(db, u2, "tok-race-1", "android")  # tidak boleh melempar
+    monkeypatch.undo()
+
+    db.rollback()
+    rows = db.scalars(
+        select(DeviceToken).where(DeviceToken.token == "tok-race-1")
+    ).all()
+    assert (
+        len(rows) == 1 and rows[0].user_id == u2.id
+    )  # kepemilikan berpindah ke akun terakhir
+    assert db.scalar(select(func.count()).select_from(DeviceToken)) == 1
